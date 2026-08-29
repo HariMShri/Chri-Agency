@@ -2552,11 +2552,12 @@ function VendorPage({ vendor, employees, entries, empById, rates, onManage }) {
       ['Range', rangeLabel],
       [],
       ['Summary'],
-      ['Amount payable (₹)', vendor.amount],
+      ['Rate per delivery (₹)', vendor.amount],
       ['Employees assigned', assignedEmployees.length],
       ['Active among them', activeCount],
       ['Products assigned', rangeAgg.assigned],
       ['Products delivered', rangeAgg.delivered],
+      ['Amount payable (₹)', vendor.amount * rangeAgg.delivered],
       ['Failed', rangeAgg.failed],
       ['Success rate', pct(rangeAgg.successRate)],
       [],
@@ -2588,16 +2589,16 @@ function VendorPage({ vendor, employees, entries, empById, rates, onManage }) {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 14, marginBottom: 14 }}>
-        <MetricCard label="Amount payable to vendor" value={inr(vendor.amount)} icon={Wallet} tone="amber" />
         <MetricCard label="Employees assigned" value={assignedEmployees.length} icon={Users} tone="navy" />
         <MetricCard label="Active among them" value={activeCount} icon={CheckCircle2} tone="teal" />
+        <MetricCard label="Rate per delivery" value={`${inr(vendor.amount)} /delivery`} icon={Wallet} tone="amber" />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 14, marginBottom: 20 }}>
+        <MetricCard label="Amount payable to vendor" value={inr(vendor.amount * rangeAgg.delivered)} sub={`${inr(vendor.amount)} × ${rangeAgg.delivered} delivered`} icon={Wallet} tone="amber" />
         <MetricCard label="Products assigned" value={rangeAgg.assigned.toLocaleString('en-IN')} icon={Package} tone="navy" />
-        <MetricCard label="Products delivered" value={rangeAgg.delivered.toLocaleString('en-IN')} sub={`of ${rangeAgg.assigned} assigned`} icon={CheckCircle2} tone="teal" />
+        <MetricCard label="Products delivered" value={rangeAgg.delivered.toLocaleString('en-IN')} sub={`of ${rangeAgg.assigned} assigned · ${pct(rangeAgg.successRate)} success`} icon={CheckCircle2} tone="teal" />
         <MetricCard label="Failed deliveries" value={rangeAgg.failed} icon={XCircle} tone="danger" />
-        <MetricCard label="Success rate" value={pct(rangeAgg.successRate)} icon={TrendingUp} tone="amber" />
       </div>
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
@@ -3403,7 +3404,11 @@ function VendorForm({ initial, employees, onSave, onClose }) {
     <Modal title={isEdit ? 'Edit vendor' : 'Add vendor'} onClose={onClose} width={480}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div><label className="edm-label">Vendor name</label><input className="edm-input" value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="e.g. Sri Logistics" /></div>
-        <div><label className="edm-label">Amount payable to vendor (₹)</label><input type="number" min="0" className="edm-input" value={form.amount} onChange={(e) => set('amount', e.target.value)} placeholder="0" /></div>
+        <div>
+          <label className="edm-label">Rate per product delivered (₹)</label>
+          <input type="number" min="0" className="edm-input" value={form.amount} onChange={(e) => set('amount', e.target.value)} placeholder="e.g. 5" />
+          <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '4px 0 0' }}>The amount payable to this vendor is calculated automatically: this rate × products delivered by their employees, for whatever date range is selected on their tab.</p>
+        </div>
 
         <div>
           <label className="edm-label">Employees under this vendor ({form.employeeIds.length} selected)</label>
@@ -3754,7 +3759,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
                     <div style={{ fontWeight: 700, fontSize: 13.5 }}>{v.name}</div>
                     <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{empCount} employee{empCount === 1 ? '' : 's'} assigned</div>
                   </div>
-                  <div className="font-mono" style={{ fontWeight: 700, fontSize: 14 }}>{inr(v.amount)}</div>
+                  <div className="font-mono" style={{ fontWeight: 700, fontSize: 14 }}>{inr(v.amount)}<span style={{ fontWeight: 400, fontSize: 11.5, color: 'var(--text-muted)' }}> /delivery</span></div>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button className="edm-btn edm-btn-ghost" style={{ padding: 6 }} onClick={() => setVendorModal({ mode: 'edit', vendor: v })}><Pencil size={13} /></button>
                     <button className="edm-btn edm-btn-danger-ghost" style={{ padding: 6 }} onClick={() => setRemoveVendorTarget(v)}><Trash2 size={13} /></button>
