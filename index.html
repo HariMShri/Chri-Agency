@@ -1495,6 +1495,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const [statusFilter, setStatusFilter] = useState('All');
 
   const list = employees.filter((e) => (companyFilter === 'All' || e.company === companyFilter) && (statusFilter === 'All' || e.status === statusFilter));
+  const activeCount = employees.filter((e) => e.status === 'Active').length;
   const inactiveCount = employees.filter((e) => e.status === 'Inactive').length;
   const salaryStructures = rates.salaryStructures || [];
   const methodLabel = (id) => {
@@ -1572,7 +1573,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
     <div>
       <SectionHeader
         title="Employee management"
-        subtitle={`${employees.length} employees across ${COMPANIES.length} compan${COMPANIES.length === 1 ? 'y' : 'ies'}${inactiveCount > 0 ? ` · ${inactiveCount} inactive` : ''}`}
+        subtitle={`${employees.length} employees across ${COMPANIES.length} compan${COMPANIES.length === 1 ? 'y' : 'ies'} · ${activeCount} active${inactiveCount > 0 ? ` · ${inactiveCount} inactive` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="edm-btn edm-btn-ghost" onClick={exportEmployeesCsv}><Download size={15} /> Export CSV</button>
@@ -1591,17 +1592,18 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
         <span className="edm-label" style={{ marginBottom: 0 }}>Status</span>
         {['All', 'Active', 'Inactive'].map((s) => (
           <button key={s} className={`edm-btn ${statusFilter === s ? 'edm-btn-primary' : 'edm-btn-ghost'}`} onClick={() => setStatusFilter(s)}>
-            {s}{s === 'Inactive' && inactiveCount > 0 ? ` (${inactiveCount})` : ''}
+            {s}{s === 'Active' && activeCount > 0 ? ` (${activeCount})` : ''}{s === 'Inactive' && inactiveCount > 0 ? ` (${inactiveCount})` : ''}
           </button>
         ))}
       </div>
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
         <table className="edm-table">
-          <SortFilterHead columns={columns} controls={tableControls} extraEnd={<th></th>} />
+          <SortFilterHead columns={columns} controls={tableControls} extraStart={<th style={{ width: 40 }}>#</th>} extraEnd={<th></th>} />
           <tbody>
-            {visibleList.map((e) => (
+            {visibleList.map((e, i) => (
               <tr key={e.id}>
+                <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
                 <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{e.id}</td>
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
                 <td className="font-mono">{e.mobile}</td>
@@ -1620,7 +1622,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 </td>
               </tr>
             ))}
-            {visibleList.length === 0 && <tr><td colSpan={11} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
+            {visibleList.length === 0 && <tr><td colSpan={12} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -2245,7 +2247,9 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
   const [employeeId, setEmployeeId] = useState('');
   const [month, setMonth] = useState(toISO(today()).slice(0, 7));
 
-  const companyEmployees = employees.filter((e) => company === 'All' || e.company === company);
+  // Only active employees are offered here — this form is for logging ongoing daily deliveries,
+  // and an inactive employee (already selected before, if any) is kept so the form doesn't break.
+  const companyEmployees = employees.filter((e) => (company === 'All' || e.company === company) && (e.status === 'Active' || e.id === employeeId));
 
   const monthDates = useMemo(() => {
     const [y, m] = month.split('-').map(Number);
