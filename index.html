@@ -3029,9 +3029,50 @@ function ReportPage({ level, employees, entries, empById, rates }) {
     ? start.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
     : `${start.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – ${end.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`;
 
+  // Exports everything on screen — the overall summary, the (currently sorted/filtered) employee
+  // rankings, and the company-wise breakdown — as one CSV, so the report can be shared or archived
+  // outside the dashboard.
+  const exportReportCsv = () => {
+    const rows = [
+      [meta.title],
+      ['Range', rangeLabel],
+      [],
+      ['Summary'],
+      ['Assigned', overall.assigned],
+      ['Delivered', overall.delivered],
+      ['Failed', overall.failed],
+      ['Success rate', pct(overall.successRate)],
+      ['Revenue (₹)', Math.round(overall.revenue)],
+      ['Payroll (₹)', Math.round(overall.payroll)],
+      ['Petrol allowance (₹)', Math.round(overall.petrol)],
+      ['Profit (₹)', Math.round(overall.profit)],
+      ['Margin', pct(overall.margin)],
+      [],
+      ['Employee rankings'],
+      ['#', 'Employee ID', 'Employee', 'Company', 'Status', 'Assigned', 'Delivered', 'Failed', 'Success %', 'Revenue (₹)', 'Payroll (₹)', 'Petrol (₹)', 'Total salary (₹)'],
+      ...visibleEmpPerf.map((e) => [
+        e.rank, e.id, e.name, e.company, e.status,
+        e.assigned, e.delivered, e.failed, e.successRate.toFixed(1),
+        Math.round(e.revenue), Math.round(e.payroll), Math.round(e.petrol), Math.round(e.payroll + e.petrol),
+      ]),
+      [],
+      ['Company-wise performance'],
+      ['Company', 'Assigned', 'Delivered', 'Failed', 'Success %', 'Revenue (₹)', 'Expense (₹)', 'Profit (₹)'],
+      ...companyPerf.map((c) => [
+        c.company, c.assigned, c.delivered, c.failed, c.successRate.toFixed(1),
+        Math.round(c.revenue), Math.round(c.totalExpense), Math.round(c.profit),
+      ]),
+    ];
+    downloadCsv(`${level}_report_${toISO(start)}_to_${toISO(end)}.csv`, rows);
+  };
+
   return (
     <div>
-      <SectionHeader title={meta.title} subtitle={meta.subtitle} />
+      <SectionHeader
+        title={meta.title}
+        subtitle={meta.subtitle}
+        right={<button className="edm-btn edm-btn-ghost" onClick={exportReportCsv}><Download size={15} /> Export CSV</button>}
+      />
 
       <FilterBar preset={preset} setPreset={setPreset} customStart={customStart} customEnd={customEnd} setCustomStart={setCustomStart} setCustomEnd={setCustomEnd}
         employeeFilter={employeeFilter} setEmployeeFilter={setEmployeeFilter} employees={employees}
@@ -3653,7 +3694,7 @@ function LoginPage({ onLogin }) {
             <Truck size={20} color="#2A1B05" />
           </div>
           <div>
-            <div className="font-display" style={{ fontWeight: 700, fontSize: 16 }}>DeliveryOps</div>
+            <div className="font-display" style={{ fontWeight: 700, fontSize: 16 }}>CHRI AGENCY</div>
             <div style={{ color: 'var(--text-muted)', fontSize: 11.5 }}>Sign in to continue</div>
           </div>
         </div>
@@ -3811,7 +3852,7 @@ function DashboardApp({ currentUser, onLogout }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const currentNavLabel = useMemo(() => {
     for (const g of nav) { const found = g.items.find((i) => i.id === page); if (found) return found.label; }
-    return 'DeliveryOps';
+    return 'CHRI AGENCY';
   }, [nav, page]);
 
   const renderPage = () => {
@@ -3863,7 +3904,7 @@ function DashboardApp({ currentUser, onLogout }) {
             <Truck size={16} color="#2A1B05" />
           </div>
           <div style={{ flex: 1 }}>
-            <div className="font-display" style={{ color: '#fff', fontWeight: 700, fontSize: 14, lineHeight: 1.2 }}>DeliveryOps</div>
+            <div className="font-display" style={{ color: '#fff', fontWeight: 700, fontSize: 14, lineHeight: 1.2 }}>CHRI AGENCY</div>
             <div style={{ color: '#7C88A6', fontSize: 10.5 }}>Delivery management</div>
           </div>
           <button className="edm-menu-btn" onClick={() => setMobileNavOpen(false)} style={{ background: 'transparent', border: 'none', color: '#B7C0D8', cursor: 'pointer', padding: 4 }}>
