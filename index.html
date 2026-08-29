@@ -755,8 +755,12 @@ function GlobalStyle() {
       .edm-route-track { position:relative; height:6px; border-radius:3px; background-image:repeating-linear-gradient(90deg, var(--border) 0 6px, transparent 6px 12px); }
       .edm-route-fill { position:absolute; top:0; left:0; height:100%; border-radius:3px; background:var(--teal); }
       .edm-route-dot { position:absolute; top:50%; width:16px; height:16px; border-radius:50%; background:var(--amber); transform:translate(-50%,-50%); box-shadow:0 0 0 3px var(--surface); display:flex; align-items:center; justify-content:center; }
+      .edm-scroll { -webkit-overflow-scrolling:touch; }
       .edm-scroll::-webkit-scrollbar { height:6px; width:6px; }
       .edm-scroll::-webkit-scrollbar-thumb { background:#D6D9DE; border-radius:3px; }
+      /* Every sortable/filterable column header carries a filter box under its label — give that
+         box a floor so auto table layout can't crush the column down to an unusable sliver. */
+      .edm-table th input.edm-input, .edm-table th select.edm-select { min-width:64px; }
       .edm-tab { padding:8px 16px; border-radius:8px; font-size:13px; font-weight:600; color:var(--text-muted); cursor:pointer; border:1px solid transparent; }
       .edm-tab-active { background:var(--surface); color:var(--text); border-color:var(--border); }
       .payslip-sheet { position:relative; overflow:hidden; background:#fff; border:1px solid var(--border); border-radius:12px; padding:32px; max-width:720px; margin:0 auto; }
@@ -827,10 +831,14 @@ function GlobalStyle() {
         .edm-root [style*="justify-content: space-between"] { flex-wrap:wrap; row-gap:8px; }
 
         .edm-table th, .edm-table td { padding:8px 10px; font-size:12.5px; }
-        /* Text columns wrap instead of forcing horizontal expansion; numeric/mono columns
-           (amounts, dates, ids) stay on one line since wrapping those hurts readability */
-        .edm-table th, .edm-table td:not(.font-mono) { white-space:normal; word-break:break-word; vertical-align:top; }
-        .edm-table td.font-mono { white-space:nowrap; }
+        /* Most tables now carry a sort arrow plus a filter box on every column — wrapping header
+           text there just squeezes the filter boxes into unusable slivers (each still needs its
+           full width regardless of how the label above it wraps). Every column instead keeps its
+           natural single-line width and the .edm-scroll wrapper around the table scrolls
+           horizontally; long free-text cells (remarks, address, etc.) already truncate with an
+           ellipsis in JS, which only works with nowrap. */
+        .edm-table th, .edm-table td { white-space:nowrap; }
+        .edm-table th { vertical-align:bottom; }
         h1.font-display[style], h2.font-display[style] { font-size:18px !important; }
 
         /* Shrink cards, metrics and buttons so nothing overflows a phone width */
