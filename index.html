@@ -267,6 +267,10 @@ const LOGO_DATA_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAfQAAAH0CAY
 // added at any time) and made available to every page/component via this context.
 const CompaniesContext = React.createContext(DEFAULT_COMPANIES);
 
+// Live list of hub locations, managed from Settings, made available the same way.
+const DEFAULT_HUB_LOCATIONS = [];
+const HubLocationsContext = React.createContext(DEFAULT_HUB_LOCATIONS);
+
 const DEFAULT_RATES = {
   salaryStructures: [
     { id: 'method1', label: 'Method 1', perDelivery: 15, petrol: 100 },
@@ -1261,11 +1265,12 @@ function DashboardPage({ employees, entries, empById, rates }) {
 /* ---------------------------------- Employee Management page ---------------------------------- */
 
 function emptyEmployeeForm(salaryStructures, companies) {
-  return { id: '', name: '', mobile: '', address: '', joiningDate: toISO(today()), company: companies?.[0] || '', salaryMethod: salaryStructures?.[0]?.id || '', status: 'Active', relievingDate: '', relievingReason: '', bankAccountName: '', bankAccountNumber: '', bankIfsc: '', upiId: '' };
+  return { id: '', name: '', mobile: '', address: '', hubLocation: '', joiningDate: toISO(today()), company: companies?.[0] || '', salaryMethod: salaryStructures?.[0]?.id || '', status: 'Active', relievingDate: '', relievingReason: '', bankAccountName: '', bankAccountNumber: '', bankIfsc: '', upiId: '' };
 }
 
 function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
   const COMPANIES = useContext(CompaniesContext);
+  const HUB_LOCATIONS = useContext(HubLocationsContext);
   const [form, setForm] = useState(initial);
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const isEdit = !!initial.id;
@@ -1319,6 +1324,19 @@ function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
             ))}
           </select>
         </div>
+      </div>
+      <div>
+        <label className="edm-label">Hub location</label>
+        <select className="edm-select" value={form.hubLocation || ''} onChange={(e) => set('hubLocation', e.target.value)}>
+          <option value="">Not assigned</option>
+          {HUB_LOCATIONS.map((h) => <option key={h} value={h}>{h}</option>)}
+          {form.hubLocation && !HUB_LOCATIONS.includes(form.hubLocation) && (
+            <option value={form.hubLocation}>{form.hubLocation} (no longer in list)</option>
+          )}
+        </select>
+        {HUB_LOCATIONS.length === 0 && (
+          <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '4px 0 0' }}>No hub locations set up yet — add some from Settings → Hub locations.</p>
+        )}
       </div>
       <div>
         <label className="edm-label">Status</label>
@@ -1440,12 +1458,12 @@ function downloadJson(filename, data) {
 }
 
 // Bundles every piece of persisted app data into one exportable object.
-function buildBackupPayload({ companies, employees, entries, rates }) {
+function buildBackupPayload({ companies, employees, entries, rates, hubLocations }) {
   return {
     schema: 'edm-backup',
     version: BACKUP_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
-    companies, employees, entries, rates,
+    companies, employees, entries, rates, hubLocations: hubLocations || [],
   };
 }
 
@@ -1456,11 +1474,13 @@ function validateBackupPayload(data) {
   if (!Array.isArray(data.entries)) return 'File is missing an "entries" list.';
   if (!Array.isArray(data.companies)) return 'File is missing a "companies" list.';
   if (!data.rates || typeof data.rates !== 'object') return 'File is missing "rates" data.';
+  // hubLocations is optional for backward compatibility with backups made before this feature existed.
   return null;
 }
 
 function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const COMPANIES = useContext(CompaniesContext);
+  const HUB_LOCATIONS = useContext(HubLocationsContext);
   const [modal, setModal] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
   const [companyFilter, setCompanyFilter] = useState('All');
@@ -1478,12 +1498,20 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const monthEntries = useMemo(() => entries.filter((en) => inRange(en.date, startOfMonth(today()), endOfMonth(today()))), [entries]);
   const deliveredThisMonth = (empId) => monthEntries.filter((en) => en.employeeId === empId).reduce((s, en) => s + en.delivered, 0);
 
+  // The filter dropdown offers every configured hub location plus any legacy value still on
+  // an employee record but no longer in the Settings list, so no employee's filter disappears.
+  const hubLocationOptions = useMemo(() => {
+    const extra = employees.map((e) => e.hubLocation).filter(Boolean);
+    return Array.from(new Set([...HUB_LOCATIONS, ...extra]));
+  }, [HUB_LOCATIONS, employees]);
+
   const tableControls = useTableControls();
   const columns = [
     { key: 'id', label: 'ID', getValue: (e) => e.id, filterType: 'text' },
     { key: 'name', label: 'Name', getValue: (e) => e.name, filterType: 'text' },
     { key: 'mobile', label: 'Mobile', getValue: (e) => e.mobile, filterType: 'text' },
     { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'select', filterOptions: COMPANIES },
+    { key: 'hubLocation', label: 'Hub location', getValue: (e) => e.hubLocation || '', filterType: 'select', filterOptions: hubLocationOptions },
     { key: 'salaryMethod', label: 'Salary method', getValue: (e) => methodLabel(e.salaryMethod), filterType: 'text' },
     { key: 'bank', label: 'Bank / UPI', getValue: (e) => e.upiId || e.bankAccountNumber || e.bankAccountName || '', filterType: 'text' },
     { key: 'joiningDate', label: 'Joined', getValue: (e) => e.joiningDate, filterType: 'text' },
@@ -1493,11 +1521,11 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const visibleList = tableControls.apply(list, columns);
 
   const exportEmployeesCsv = () => {
-    const header = ['ID', 'Name', 'Mobile', 'Address', 'Company', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
+    const header = ['ID', 'Name', 'Mobile', 'Address', 'Company', 'Hub location', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
     const rows = visibleList.map((e) => {
       const s = salaryStructures.find((x) => x.id === e.salaryMethod);
       return [
-        e.id, e.name, e.mobile, e.address, e.company,
+        e.id, e.name, e.mobile, e.address, e.company, e.hubLocation || '',
         s ? s.label : '—', s ? s.perDelivery : '', s ? s.petrol : '',
         e.joiningDate, e.status, e.relievingDate || '', e.relievingReason || '', deliveredThisMonth(e.id),
         e.upiId || '', e.bankAccountName || '', e.bankAccountNumber || '', e.bankIfsc || '',
@@ -1570,6 +1598,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
                 <td className="font-mono">{e.mobile}</td>
                 <td>{e.company}</td>
+                <td style={{ color: e.hubLocation ? 'var(--text)' : 'var(--text-muted)' }}>{e.hubLocation || '—'}</td>
                 <td>{methodLabel(e.salaryMethod)}</td>
                 <td><BankCell employee={e} /></td>
                 <td>{e.joiningDate}</td>
@@ -1583,7 +1612,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 </td>
               </tr>
             ))}
-            {visibleList.length === 0 && <tr><td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
+            {visibleList.length === 0 && <tr><td colSpan={11} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -3161,7 +3190,7 @@ function PnLPage({ employees, entries, empById, rates }) {
 
 /* ---------------------------------- Settings page ---------------------------------- */
 
-function SettingsPage({ rates, setRates, employees = [], entries = [], companies, setCompanies, setEmployees, setEntries, lastExportAt, onDataExported, onDataImported }) {
+function SettingsPage({ rates, setRates, employees = [], entries = [], companies, setCompanies, hubLocations = [], setHubLocations, setEmployees, setEntries, lastExportAt, onDataExported, onDataImported }) {
   const [form, setForm] = useState(rates);
   const [saved, setSaved] = useState(false);
   const [removeId, setRemoveId] = useState(null);
@@ -3169,6 +3198,9 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const [newCompanyRate, setNewCompanyRate] = useState(20);
   const [companyError, setCompanyError] = useState('');
   const [removeCompany, setRemoveCompany] = useState(null);
+  const [newHubLocationName, setNewHubLocationName] = useState('');
+  const [hubLocationError, setHubLocationError] = useState('');
+  const [removeHubLocation, setRemoveHubLocation] = useState(null);
   const [importError, setImportError] = useState('');
   const [importSuccess, setImportSuccess] = useState('');
   const [pendingImport, setPendingImport] = useState(null); // parsed data awaiting confirmation
@@ -3177,7 +3209,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const save = () => { setRates(form); setSaved(true); setTimeout(() => setSaved(false), 1800); };
 
   const exportAllData = () => {
-    const payload = buildBackupPayload({ companies, employees, entries, rates });
+    const payload = buildBackupPayload({ companies, employees, entries, rates, hubLocations });
     downloadJson(`deliveryops_backup_${toISO(today())}.json`, payload);
     onDataExported && onDataExported();
   };
@@ -3210,6 +3242,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
     setEntries(pendingImport.entries);
     setRates(pendingImport.rates);
     setForm(pendingImport.rates);
+    setHubLocations(Array.isArray(pendingImport.hubLocations) ? pendingImport.hubLocations : []);
     setPendingImport(null);
     setImportSuccess(`Import complete — restored ${pendingImport.employees.length} employees and ${pendingImport.entries.length} entries.`);
     onDataImported && onDataImported();
@@ -3254,6 +3287,22 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
       return { ...f, revenue };
     });
     setRemoveCompany(null);
+  };
+
+  const hubLocationUsageCount = (name) => employees.filter((e) => e.hubLocation === name).length;
+
+  const addHubLocation = () => {
+    const name = newHubLocationName.trim();
+    if (!name) { setHubLocationError('Enter a hub location name.'); return; }
+    if (hubLocations.some((h) => h.toLowerCase() === name.toLowerCase())) { setHubLocationError('That hub location already exists.'); return; }
+    setHubLocations((prev) => [...prev, name]);
+    setNewHubLocationName('');
+    setHubLocationError('');
+  };
+
+  const confirmRemoveHubLocation = (name) => {
+    setHubLocations((prev) => prev.filter((h) => h !== name));
+    setRemoveHubLocation(null);
   };
 
   return (
@@ -3372,6 +3421,53 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
         </div>
       </div>
 
+      <div className="edm-card" style={{ padding: 20, marginBottom: 16 }}>
+        <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 6px' }}>Hub locations</h3>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 14px' }}>
+          Add every hub as its own entry here — they'll show up as a dropdown when assigning an employee's hub location in Employee management.
+        </p>
+
+        {hubLocations.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+            {hubLocations.map((h) => {
+              const inUse = hubLocationUsageCount(h);
+              return (
+                <div key={h} className="edm-card" style={{ padding: '7px 8px 7px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 13 }}>{h}</span>
+                  {inUse > 0 && (
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>({inUse})</span>
+                  )}
+                  <button
+                    className="edm-btn edm-btn-danger-ghost"
+                    style={{ padding: 4 }}
+                    title="Remove this hub location"
+                    onClick={() => setRemoveHubLocation(h)}
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ borderTop: hubLocations.length > 0 ? '1px solid var(--border)' : 'none', paddingTop: hubLocations.length > 0 ? 16 : 0 }}>
+          <label className="edm-label">Add a new hub location</label>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <input
+                className="edm-input" placeholder="e.g. Whitefield hub"
+                value={newHubLocationName}
+                onChange={(e) => { setNewHubLocationName(e.target.value); setHubLocationError(''); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addHubLocation(); } }}
+              />
+            </div>
+            <button className="edm-btn edm-btn-amber" onClick={addHubLocation}><Plus size={15} /> Add hub location</button>
+          </div>
+          {hubLocationError && <p style={{ fontSize: 12, color: 'var(--danger)', marginTop: 8, marginBottom: 0 }}>{hubLocationError}</p>}
+        </div>
+      </div>
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button className="edm-btn edm-btn-amber" onClick={save}>Save settings</button>
         {saved && <span style={{ fontSize: 13, color: 'var(--teal-dark)', fontWeight: 600 }}>Settings saved</span>}
@@ -3400,6 +3496,19 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
           <div style={{ display: 'flex', gap: 10 }}>
             <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => confirmRemoveCompany(removeCompany)}>Remove</button>
             <button className="edm-btn edm-btn-ghost" onClick={() => setRemoveCompany(null)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+      {removeHubLocation && (
+        <Modal title="Remove hub location" onClose={() => setRemoveHubLocation(null)} width={380}>
+          <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>
+            {hubLocationUsageCount(removeHubLocation) > 0
+              ? `${hubLocationUsageCount(removeHubLocation)} employee${hubLocationUsageCount(removeHubLocation) === 1 ? ' is' : 's are'} currently assigned to "${removeHubLocation}". Their records stay on file, but you'll need to reassign them to another hub. This can't be undone.`
+              : `This removes "${removeHubLocation}" from the hub location list. This can't be undone.`}
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => confirmRemoveHubLocation(removeHubLocation)}>Remove</button>
+            <button className="edm-btn edm-btn-ghost" onClick={() => setRemoveHubLocation(null)}>Cancel</button>
           </div>
         </Modal>
       )}
@@ -3613,6 +3722,7 @@ function App() {
 
 function DashboardApp({ currentUser, onLogout }) {
   const [companies, setCompanies] = useState(() => loadLS('companies', DEFAULT_COMPANIES));
+  const [hubLocations, setHubLocations] = useState(() => loadLS('hubLocations', DEFAULT_HUB_LOCATIONS));
   const [employees, setEmployees] = useState(() => loadLS('employees', []));
   const [entries, setEntries] = useState(() => loadLS('entries', []));
   const [rates, setRates] = useState(() => loadLS('rates', DEFAULT_RATES));
@@ -3633,6 +3743,7 @@ function DashboardApp({ currentUser, onLogout }) {
           const data = snap.data() || {};
           applyingRemoteRef.current = true;
           if (Array.isArray(data.companies)) setCompanies(data.companies);
+          if (Array.isArray(data.hubLocations)) setHubLocations(data.hubLocations);
           if (Array.isArray(data.employees)) setEmployees(data.employees);
           if (Array.isArray(data.entries)) setEntries(data.entries);
           if (data.rates) setRates(data.rates);
@@ -3641,7 +3752,7 @@ function DashboardApp({ currentUser, onLogout }) {
         } else if (!hasLoadedRemoteRef.current) {
           // Nothing in Firestore yet — seed it with whatever's already in this browser.
           hasLoadedRemoteRef.current = true;
-          DATA_DOC.set({ companies, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => setSyncStatus('error'));
+          DATA_DOC.set({ companies, hubLocations, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => setSyncStatus('error'));
         }
       },
       () => setSyncStatus('error')
@@ -3657,16 +3768,17 @@ function DashboardApp({ currentUser, onLogout }) {
     if (applyingRemoteRef.current) { applyingRemoteRef.current = false; return; }
     setSyncStatus('syncing');
     const t = setTimeout(() => {
-      DATA_DOC.set({ companies, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
+      DATA_DOC.set({ companies, hubLocations, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
         .then(() => setSyncStatus('synced'))
         .catch(() => setSyncStatus('error'));
     }, 600);
     return () => clearTimeout(t);
-  }, [companies, employees, entries, rates]);
+  }, [companies, hubLocations, employees, entries, rates]);
 
   // Keep a local cache too, so the dashboard opens instantly and still works
   // briefly offline (Firestore's own offline cache also helps with this).
   useEffect(() => { saveLS('companies', companies); }, [companies]);
+  useEffect(() => { saveLS('hubLocations', hubLocations); }, [hubLocations]);
   useEffect(() => { saveLS('employees', employees); }, [employees]);
   useEffect(() => { saveLS('entries', entries); }, [entries]);
   useEffect(() => { saveLS('rates', rates); }, [rates]);
@@ -3677,7 +3789,7 @@ function DashboardApp({ currentUser, onLogout }) {
   const daysSince = (iso) => (iso ? (Date.now() - new Date(iso).getTime()) / 86400000 : Infinity);
   const showBackupReminder = employees.length > 0 && daysSince(lastExportAt) >= 7 && daysSince(reminderSnoozedAt) >= 3;
   const exportFromReminder = () => {
-    const payload = buildBackupPayload({ companies, employees, entries, rates });
+    const payload = buildBackupPayload({ companies, employees, entries, rates, hubLocations });
     downloadJson(`deliveryops_backup_${toISO(today())}.json`, payload);
     setLastExportAt(new Date().toISOString());
   };
@@ -3713,6 +3825,7 @@ function DashboardApp({ currentUser, onLogout }) {
           employees={employees} setEmployees={setEmployees}
           entries={entries} setEntries={setEntries}
           companies={companies} setCompanies={setCompanies}
+          hubLocations={hubLocations} setHubLocations={setHubLocations}
           lastExportAt={lastExportAt}
           onDataExported={() => setLastExportAt(new Date().toISOString())}
           onDataImported={() => setPage('dashboard')}
@@ -3726,6 +3839,7 @@ function DashboardApp({ currentUser, onLogout }) {
 
   return (
     <CompaniesContext.Provider value={companies}>
+    <HubLocationsContext.Provider value={hubLocations}>
     <div className="edm-root" style={{ display: 'flex', minHeight: '100vh', fontSize: 14 }}>
       <GlobalStyle />
 
@@ -3807,6 +3921,7 @@ function DashboardApp({ currentUser, onLogout }) {
         {renderPage()}
       </main>
     </div>
+    </HubLocationsContext.Provider>
     </CompaniesContext.Provider>
   );
 }
