@@ -88,6 +88,7 @@ const Eye = makeIcon(<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><
 const EyeOff = makeIcon(<><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 11 8 11 8a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 1 12s4 8 11 8a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></>);
 const Share2 = makeIcon(<><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></>);
 const Camera = makeIcon(<><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="4"/></>);
+const CalendarDays = makeIcon(<><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/></>);
 
 /* ============================================================
    Minimal chart engine (replaces recharts so the file has zero
@@ -1734,6 +1735,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
   const [company, setCompany] = useState('All');
   const [modal, setModal] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
+  const [monthModalOpen, setMonthModalOpen] = useState(false);
 
   const dayEntries = entries.filter((en) => en.date === date && (company === 'All' || en.company === company));
   const dayAgg = aggregate(dayEntries, empById, rates);
@@ -1849,6 +1851,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
             <button className="edm-btn edm-btn-ghost" disabled={isSharing} onClick={shareReport}>
               <Share2 size={15} /> {isSharing ? 'Preparing…' : hasSelection ? `Share selected (${selectedIds.size})` : 'Share / export report'}
             </button>
+            <button className="edm-btn edm-btn-ghost" onClick={() => setMonthModalOpen(true)}><CalendarDays size={15} /> Monthly entry (one employee)</button>
             <button className="edm-btn edm-btn-amber" onClick={() => setModal({ mode: 'add' })}><Plus size={15} /> Add entry (other employee)</button>
           </div>
         }
@@ -1943,6 +1946,15 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
           onEditExisting={(existing) => setModal({ mode: 'edit', entry: existing })}
         />
       )}
+      {monthModalOpen && (
+        <MonthlyEntryForm
+          employees={employees}
+          entries={entries}
+          setEntries={setEntries}
+          empById={empById}
+          onClose={() => setMonthModalOpen(false)}
+        />
+      )}
       {deleteId && (
         <Modal title="Delete entry" onClose={() => setDeleteId(null)} width={360}>
           <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>This removes the delivery record and adjusts all dependent reports. You'll have a few seconds to undo right after.</p>
@@ -2018,6 +2030,162 @@ function DailyEntryForm({ employees, entries, initial, onSave, onClose, onEditEx
             Save entry
           </button>
           <button className="edm-btn edm-btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) {
+  const COMPANIES = useContext(CompaniesContext);
+  const [company, setCompany] = useState('All');
+  const [employeeId, setEmployeeId] = useState('');
+  const [month, setMonth] = useState(toISO(today()).slice(0, 7));
+
+  const companyEmployees = employees.filter((e) => company === 'All' || e.company === company);
+
+  const monthDates = useMemo(() => {
+    const [y, m] = month.split('-').map(Number);
+    const lastDay = new Date(y, m, 0).getDate();
+    return Array.from({ length: lastDay }, (_, i) => toISO(new Date(y, m - 1, i + 1)));
+  }, [month]);
+
+  const buildRows = () => monthDates.map((date) => {
+    const existing = employeeId ? entries.find((en) => en.employeeId === employeeId && en.date === date) : null;
+    return {
+      date,
+      entryId: existing ? existing.id : null,
+      assigned: existing ? String(existing.assigned) : '',
+      delivered: existing ? String(existing.delivered) : '',
+      remarks: existing ? existing.remarks : '',
+    };
+  });
+
+  const [rows, setRows] = useState(buildRows);
+  const [flash, setFlash] = useState({});
+
+  useEffect(() => { setRows(buildRows()); }, [employeeId, month, entries.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setRow = (date, patch) => setRows((prev) => prev.map((r) => (r.date === date ? { ...r, ...patch } : r)));
+
+  const saveRow = (date) => {
+    const row = rows.find((r) => r.date === date);
+    const emp = empById[employeeId];
+    if (!row || !emp) return;
+    if (row.assigned === '' && row.delivered === '' && !row.remarks) return;
+    const assigned = Number(row.assigned) || 0;
+    const delivered = Math.min(assigned, Number(row.delivered) || 0);
+    const failed = Math.max(0, assigned - delivered);
+    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '' };
+    setEntries((prev) => {
+      const idx = prev.findIndex((en) => en.id === record.id);
+      if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
+      return [...prev, record];
+    });
+    setRows((prev) => prev.map((r) => (r.date === date ? { ...r, entryId: record.id } : r)));
+    setFlash((f) => ({ ...f, [date]: true }));
+    setTimeout(() => setFlash((f) => ({ ...f, [date]: false })), 1400);
+  };
+
+  const monthAgg = useMemo(() => rows.reduce((acc, r) => {
+    const assigned = Number(r.assigned) || 0;
+    const delivered = Math.min(assigned, Number(r.delivered) || 0);
+    acc.assigned += assigned; acc.delivered += delivered; acc.failed += Math.max(0, assigned - delivered);
+    return acc;
+  }, { assigned: 0, delivered: 0, failed: 0 }), [rows]);
+
+  const monthLabel = fromISO(`${month}-01`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+
+  return (
+    <Modal title="Monthly delivery entry (single employee)" onClose={onClose} width={720}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+          Pick an employee and a month to fill in delivery numbers for every day at once — each row saves automatically as soon as you fill it in and click away.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+          <div>
+            <label className="edm-label">Company</label>
+            <select className="edm-select" value={company} onChange={(e) => { setCompany(e.target.value); setEmployeeId(''); }}>
+              <option value="All">All companies</option>
+              {COMPANIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="edm-label">Employee</label>
+            <select className="edm-select" value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+              <option value="">Select employee</option>
+              {companyEmployees.map((e) => <option key={e.id} value={e.id}>{e.name}{e.status === 'Inactive' ? ' (inactive)' : ''}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="edm-label">Month</label>
+            <input type="month" className="edm-input" value={month} onChange={(e) => setMonth(e.target.value)} />
+          </div>
+        </div>
+
+        {!employeeId ? (
+          <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+            Select an employee to start entering daily deliveries for {monthLabel}.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', background: '#F7F8FA', borderRadius: 8, padding: '10px 12px' }}>
+              <div><div className="edm-label">Assigned</div><div className="font-mono" style={{ fontWeight: 700 }}>{monthAgg.assigned}</div></div>
+              <div><div className="edm-label">Delivered</div><div className="font-mono" style={{ fontWeight: 700, color: 'var(--teal-dark)' }}>{monthAgg.delivered}</div></div>
+              <div><div className="edm-label">Failed</div><div className="font-mono" style={{ fontWeight: 700, color: 'var(--danger)' }}>{monthAgg.failed}</div></div>
+            </div>
+            <div className="edm-scroll" style={{ maxHeight: '46vh', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+              <table className="edm-table">
+                <thead><tr>
+                  <th>Date</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Remarks</th><th style={{ width: 40 }}></th>
+                </tr></thead>
+                <tbody>
+                  {rows.map((row) => {
+                    const assigned = Number(row.assigned) || 0;
+                    const delivered = Math.min(assigned, Number(row.delivered) || 0);
+                    const failed = Math.max(0, assigned - delivered);
+                    const label = fromISO(row.date).toLocaleDateString('en-IN', { weekday: 'short', day: '2-digit', month: 'short' });
+                    return (
+                      <tr key={row.date}>
+                        <td style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{label}</td>
+                        <td style={{ minWidth: 80 }}>
+                          <input type="number" min="0" className="edm-input" style={{ padding: '5px 8px' }}
+                            value={row.assigned}
+                            onChange={(e) => setRow(row.date, { assigned: e.target.value })}
+                            onBlur={() => saveRow(row.date)}
+                            placeholder="0" />
+                        </td>
+                        <td style={{ minWidth: 80 }}>
+                          <input type="number" min="0" className="edm-input" style={{ padding: '5px 8px' }}
+                            value={row.delivered}
+                            onChange={(e) => setRow(row.date, { delivered: e.target.value })}
+                            onBlur={() => saveRow(row.date)}
+                            placeholder="0" />
+                        </td>
+                        <td className="font-mono" style={{ color: 'var(--danger)' }}>{failed}</td>
+                        <td style={{ minWidth: 140 }}>
+                          <input className="edm-input" style={{ padding: '5px 8px' }}
+                            value={row.remarks}
+                            onChange={(e) => setRow(row.date, { remarks: e.target.value })}
+                            onBlur={() => saveRow(row.date)}
+                            placeholder="Notes" />
+                        </td>
+                        <td>
+                          {flash[row.date]
+                            ? <CheckCircle2 size={15} color="var(--teal-dark)" />
+                            : (row.entryId ? <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Saved</span> : null)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+          <button className="edm-btn edm-btn-ghost" onClick={onClose}>Close</button>
         </div>
       </div>
     </Modal>
