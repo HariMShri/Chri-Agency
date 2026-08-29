@@ -1135,7 +1135,7 @@ function SortFilterHead({ columns, controls, extraStart, extraEnd }) {
   );
 }
 
-function FilterBar({ preset, setPreset, customStart, customEnd, setCustomStart, setCustomEnd, employeeFilter, setEmployeeFilter, employees, companyFilter, setCompanyFilter, showCompany = true, showEmployee = true }) {
+function FilterBar({ preset, setPreset, customStart, customEnd, setCustomStart, setCustomEnd, employeeFilter, setEmployeeFilter, employees, companyFilter, setCompanyFilter, showCompany = true, showEmployee = true, vendors, vendorFilter, setVendorFilter, showVendor = false }) {
   const COMPANIES = useContext(CompaniesContext);
   return (
     <div className="edm-card" style={{ padding: 14, display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end', marginBottom: 18 }}>
@@ -1169,6 +1169,15 @@ function FilterBar({ preset, setPreset, customStart, customEnd, setCustomStart, 
           <select className="edm-select" value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)}>
             <option value="All">All employees</option>
             {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </select>
+        </div>
+      )}
+      {showVendor && (
+        <div style={{ minWidth: 170 }}>
+          <label className="edm-label">Vendor</label>
+          <select className="edm-select" value={vendorFilter} onChange={(e) => setVendorFilter(e.target.value)}>
+            <option value="All">All vendors</option>
+            {(vendors || []).map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
           </select>
         </div>
       )}
@@ -2500,35 +2509,95 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
 
 /* ---------------------------------- Vendor page (per vendor) ---------------------------------- */
 
-function VendorPage({ vendor, employees, entries, onManage }) {
+function VendorPage({ vendor, employees, entries, empById, rates, onManage }) {
+  const [preset, setPreset] = useState('thisMonth');
+  const [customStart, setCustomStart] = useState(toISO(today()));
+  const [customEnd, setCustomEnd] = useState(toISO(today()));
+
+  const [start, end] = getRange(preset, customStart, customEnd);
+  const rangeLabel = start.getTime() === end.getTime()
+    ? start.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    : `${start.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – ${end.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`;
+
   const assignedEmployees = employees.filter((e) => (vendor.employeeIds || []).includes(e.id));
   const activeCount = assignedEmployees.filter((e) => e.status === 'Active').length;
+  const assignedIds = useMemo(() => new Set(vendor.employeeIds || []), [vendor.employeeIds]);
 
-  const monthEntries = useMemo(() => entries.filter((en) => inRange(en.date, startOfMonth(today()), endOfMonth(today()))), [entries]);
-  const deliveredThisMonth = (empId) => monthEntries.filter((en) => en.employeeId === empId).reduce((s, en) => s + en.delivered, 0);
+  const rangeEntries = entries.filter((en) => assignedIds.has(en.employeeId) && inRange(en.date, start, end));
+  const rangeAgg = aggregate(rangeEntries, empById, rates);
+
+  // Delivery numbers per employee, for the selected date range — this is what "calculation
+  // details based on products delivered" refers to, both in the summary cards above and per row.
+  const perEmployee = assignedEmployees.map((e) => {
+    const es = rangeEntries.filter((en) => en.employeeId === e.id);
+    return { ...e, ...aggregate(es, empById, rates) };
+  });
 
   const tableControls = useTableControls();
   const columns = [
     { key: 'name', label: 'Employee', getValue: (e) => e.name, filterType: 'text' },
-    { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'text' },
     { key: 'hubLocation', label: 'Hub location', getValue: (e) => e.hubLocation || '', filterType: 'text' },
     { key: 'status', label: 'Status', getValue: (e) => e.status, filterType: 'select', filterOptions: ['Active', 'Inactive'] },
-    { key: 'delivered', label: 'Delivered (month)', getValue: (e) => deliveredThisMonth(e.id), filterType: 'text' },
+    { key: 'assigned', label: 'Assigned', getValue: (e) => e.assigned, filterType: 'text' },
+    { key: 'delivered', label: 'Delivered', getValue: (e) => e.delivered, filterType: 'text' },
+    { key: 'failed', label: 'Failed', getValue: (e) => e.failed, filterType: 'text' },
+    { key: 'successRate', label: 'Success %', getValue: (e) => e.successRate, filterType: 'text' },
   ];
-  const visibleList = tableControls.apply(assignedEmployees, columns);
+  const visibleList = tableControls.apply(perEmployee, columns);
+
+  // Exports the vendor summary plus the per-employee delivery breakdown for the selected range.
+  const exportVendorCsv = () => {
+    const rows = [
+      [vendor.name],
+      ['Range', rangeLabel],
+      [],
+      ['Summary'],
+      ['Amount payable (₹)', vendor.amount],
+      ['Employees assigned', assignedEmployees.length],
+      ['Active among them', activeCount],
+      ['Products assigned', rangeAgg.assigned],
+      ['Products delivered', rangeAgg.delivered],
+      ['Failed', rangeAgg.failed],
+      ['Success rate', pct(rangeAgg.successRate)],
+      [],
+      ['Employees'],
+      ['Employee', 'Hub location', 'Status', 'Assigned', 'Delivered', 'Failed', 'Success %'],
+      ...visibleList.map((e) => [e.name, e.hubLocation || '', e.status, e.assigned, e.delivered, e.failed, e.successRate.toFixed(1)]),
+    ];
+    downloadCsv(`vendor_${vendor.name.replace(/\s+/g, '_')}_${toISO(start)}_to_${toISO(end)}.csv`, rows);
+  };
 
   return (
     <div>
       <SectionHeader
         title={vendor.name}
         subtitle={`${assignedEmployees.length} employee${assignedEmployees.length === 1 ? '' : 's'} assigned · ${activeCount} active`}
-        right={<button className="edm-btn edm-btn-ghost" onClick={onManage}><SettingsIcon size={15} /> Manage in Settings</button>}
+        right={
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="edm-btn edm-btn-ghost" onClick={exportVendorCsv}><Download size={15} /> Export CSV</button>
+            <button className="edm-btn edm-btn-ghost" onClick={onManage}><SettingsIcon size={15} /> Manage in Settings</button>
+          </div>
+        }
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 14, marginBottom: 20 }}>
+      <FilterBar preset={preset} setPreset={setPreset} customStart={customStart} customEnd={customEnd} setCustomStart={setCustomStart} setCustomEnd={setCustomEnd}
+        employeeFilter="All" setEmployeeFilter={() => {}} employees={[]} showEmployee={false} showCompany={false} />
+
+      <div className="edm-card" style={{ padding: '10px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text-muted)' }}>
+        <ChevronRight size={13} /> Showing <strong style={{ color: 'var(--text)' }}>{rangeLabel}</strong>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 14, marginBottom: 14 }}>
         <MetricCard label="Amount payable to vendor" value={inr(vendor.amount)} icon={Wallet} tone="amber" />
         <MetricCard label="Employees assigned" value={assignedEmployees.length} icon={Users} tone="navy" />
         <MetricCard label="Active among them" value={activeCount} icon={CheckCircle2} tone="teal" />
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 14, marginBottom: 20 }}>
+        <MetricCard label="Products assigned" value={rangeAgg.assigned.toLocaleString('en-IN')} icon={Package} tone="navy" />
+        <MetricCard label="Products delivered" value={rangeAgg.delivered.toLocaleString('en-IN')} sub={`of ${rangeAgg.assigned} assigned`} icon={CheckCircle2} tone="teal" />
+        <MetricCard label="Failed deliveries" value={rangeAgg.failed} icon={XCircle} tone="danger" />
+        <MetricCard label="Success rate" value={pct(rangeAgg.successRate)} icon={TrendingUp} tone="amber" />
       </div>
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
@@ -2538,14 +2607,16 @@ function VendorPage({ vendor, employees, entries, onManage }) {
             {visibleList.map((e) => (
               <tr key={e.id}>
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
-                <td>{e.company}</td>
                 <td style={{ color: e.hubLocation ? 'var(--text)' : 'var(--text-muted)' }}>{e.hubLocation || '—'}</td>
                 <td><StatusBadge status={e.status} /></td>
-                <td className="font-mono">{deliveredThisMonth(e.id)}</td>
+                <td className="font-mono">{e.assigned}</td>
+                <td className="font-mono" style={{ color: 'var(--teal-dark)' }}>{e.delivered}</td>
+                <td className="font-mono" style={{ color: 'var(--danger)' }}>{e.failed}</td>
+                <td className="font-mono">{pct(e.successRate)}</td>
               </tr>
             ))}
             {visibleList.length === 0 && (
-              <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>
+              <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>
                 {assignedEmployees.length === 0 ? 'No employees assigned to this vendor yet — add some from Settings.' : 'No employees match the current filters.'}
               </td></tr>
             )}
@@ -3041,7 +3112,7 @@ const REPORT_META = {
   yearly: { title: 'Yearly reports', subtitle: 'Annual overview with monthly comparison', defaultPreset: 'thisYear' },
 };
 
-function ReportPage({ level, employees, entries, empById, rates }) {
+function ReportPage({ level, employees, entries, empById, rates, vendors = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const meta = REPORT_META[level];
   const [preset, setPreset] = useState(meta.defaultPreset);
@@ -3049,17 +3120,25 @@ function ReportPage({ level, employees, entries, empById, rates }) {
   const [customEnd, setCustomEnd] = useState(toISO(today()));
   const [employeeFilter, setEmployeeFilter] = useState('All');
   const [companyFilter, setCompanyFilter] = useState('All');
+  const [vendorFilter, setVendorFilter] = useState('All');
 
   // Auto-update preset when report level changes (Daily/Weekly/Monthly/Yearly)
   useEffect(() => {
     setPreset(meta.defaultPreset);
   }, [level]);
 
+  const vendorEmployeeIds = useMemo(() => {
+    if (vendorFilter === 'All') return null;
+    const v = vendors.find((x) => x.id === vendorFilter);
+    return new Set(v ? v.employeeIds || [] : []);
+  }, [vendorFilter, vendors]);
+
   const [start, end] = getRange(preset, customStart, customEnd);
   const filtered = entries.filter((en) =>
     inRange(en.date, start, end) &&
     (companyFilter === 'All' || en.company === companyFilter) &&
-    (employeeFilter === 'All' || en.employeeId === employeeFilter)
+    (employeeFilter === 'All' || en.employeeId === employeeFilter) &&
+    (!vendorEmployeeIds || vendorEmployeeIds.has(en.employeeId))
   );
 
   const overall = aggregate(filtered, empById, rates);
@@ -3094,9 +3173,11 @@ function ReportPage({ level, employees, entries, empById, rates }) {
   // rankings, and the company-wise breakdown — as one CSV, so the report can be shared or archived
   // outside the dashboard.
   const exportReportCsv = () => {
+    const vendorLabel = vendorFilter === 'All' ? 'All vendors' : (vendors.find((v) => v.id === vendorFilter)?.name || 'All vendors');
     const rows = [
       [meta.title],
       ['Range', rangeLabel],
+      ['Vendor', vendorLabel],
       [],
       ['Summary'],
       ['Assigned', overall.assigned],
@@ -3137,7 +3218,8 @@ function ReportPage({ level, employees, entries, empById, rates }) {
 
       <FilterBar preset={preset} setPreset={setPreset} customStart={customStart} customEnd={customEnd} setCustomStart={setCustomStart} setCustomEnd={setCustomEnd}
         employeeFilter={employeeFilter} setEmployeeFilter={setEmployeeFilter} employees={employees}
-        companyFilter={companyFilter} setCompanyFilter={setCompanyFilter} />
+        companyFilter={companyFilter} setCompanyFilter={setCompanyFilter}
+        vendors={vendors} vendorFilter={vendorFilter} setVendorFilter={setVendorFilter} showVendor={vendors.length > 0} />
 
       <div className="edm-card" style={{ padding: '10px 16px', marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text-muted)' }}>
         <ChevronRight size={13} /> Showing <strong style={{ color: 'var(--text)' }}>{rangeLabel}</strong>
@@ -4050,7 +4132,7 @@ function DashboardApp({ currentUser, onLogout }) {
       const vendorId = page.slice('vendor:'.length);
       const vendor = vendors.find((v) => v.id === vendorId);
       if (!vendor) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
-      return <VendorPage vendor={vendor} employees={employees} entries={entries} onManage={() => setPage('settings')} />;
+      return <VendorPage vendor={vendor} employees={employees} entries={entries} empById={empById} rates={rates} onManage={() => setPage('settings')} />;
     }
     switch (page) {
       case 'dashboard': return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
@@ -4058,10 +4140,10 @@ function DashboardApp({ currentUser, onLogout }) {
       case 'inactiveEmployees': return <InactiveEmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} rates={rates} />;
       case 'dailyEntry': return <DailyEntryPage employees={employees} entries={entries} setEntries={setEntries} empById={empById} rates={rates} />;
       case 'salary': return <SalaryPage employees={employees} entries={entries} rates={rates} />;
-      case 'reportDaily': return <ReportPage level="daily" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'reportWeekly': return <ReportPage level="weekly" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'reportMonthly': return <ReportPage level="monthly" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'reportYearly': return <ReportPage level="yearly" employees={employees} entries={entries} empById={empById} rates={rates} />;
+      case 'reportDaily': return <ReportPage level="daily" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
+      case 'reportWeekly': return <ReportPage level="weekly" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
+      case 'reportMonthly': return <ReportPage level="monthly" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
+      case 'reportYearly': return <ReportPage level="yearly" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       case 'pnl': return <PnLPage employees={employees} entries={entries} empById={empById} rates={rates} />;
       case 'settings': return (
         <SettingsPage
