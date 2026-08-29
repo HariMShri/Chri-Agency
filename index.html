@@ -12,6 +12,7 @@
 <script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.15.0/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 
 <style>
@@ -89,6 +90,9 @@ const EyeOff = makeIcon(<><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10
 const Share2 = makeIcon(<><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></>);
 const Camera = makeIcon(<><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="4"/></>);
 const CalendarDays = makeIcon(<><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01"/></>);
+const Receipt = makeIcon(<><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><line x1="8" y1="7" x2="16" y2="7"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="12" y2="15"/></>);
+const Scale = makeIcon(<><path d="M12 3v18"/><path d="M5 7h14"/><path d="M5 7 2 13a3 3 0 0 0 6 0Z"/><path d="M19 7l-3 6a3 3 0 0 0 6 0Z"/><path d="M8 21h8"/></>);
+const History = makeIcon(<><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/><polyline points="12 7 12 12 16 14"/></>);
 
 /* ============================================================
    Minimal chart engine (replaces recharts so the file has zero
@@ -257,6 +261,9 @@ function ComposedChart({ data = [], margin = {}, width, height, children }) {
 /* ---------------------------------- constants ---------------------------------- */
 
 const DEFAULT_COMPANIES = ['Evargo Services', 'Quick Transfer'];
+// Phase F: fixed-but-editable expense categories, managed in Settings the same way
+// salary structures and companies are.
+const DEFAULT_EXPENSE_CATEGORIES = ['Rent', 'Vehicle maintenance', 'Office supplies', 'Utilities', 'Miscellaneous'];
 const COMPANY_NAME = 'CHRI AGENCIES';
 const COMPANY_TAGLINE = 'Payroll Department';
 // Base64-embedded logo so the payslip (and its watermark) work with zero
@@ -267,12 +274,17 @@ const LOGO_DATA_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAfQAAAH0CAY
 // added at any time) and made available to every page/component via this context.
 const CompaniesContext = React.createContext(DEFAULT_COMPANIES);
 
+// Sentinel "since forever" date for freshly-seeded default rates — kept as a literal
+// (not the RATE_HISTORY_EPOCH constant defined further down) since this runs before that.
 const DEFAULT_RATES = {
   salaryStructures: [
-    { id: 'method1', label: 'Method 1', perDelivery: 15, petrol: 100 },
-    { id: 'method2', label: 'Method 2', perDelivery: 17, petrol: 0 },
+    { id: 'method1', label: 'Method 1', history: [{ perDelivery: 15, petrol: 100, effectiveFrom: '2000-01-01' }] },
+    { id: 'method2', label: 'Method 2', history: [{ perDelivery: 17, petrol: 0, effectiveFrom: '2000-01-01' }] },
   ],
-  revenue: { 'Evargo Services': 22, 'Quick Transfer': 28 },
+  revenue: {
+    'Evargo Services': [{ rate: 22, effectiveFrom: '2000-01-01' }],
+    'Quick Transfer': [{ rate: 28, effectiveFrom: '2000-01-01' }],
+  },
 };
 
 const PRESETS = [
@@ -299,7 +311,9 @@ function buildNav(companies) {
     { section: 'Money', items: [
       ...companies.map((c) => ({ id: `revenue:${c}`, label: `${c} revenue`, icon: Truck })),
       { id: 'salary', label: 'Salary management', icon: Wallet },
+      { id: 'expenses', label: 'Expenses', icon: Receipt },
       { id: 'pnl', label: 'Profit and loss', icon: TrendingUp },
+      { id: 'reconciliation', label: 'Reconciliation', icon: Scale },
     ]},
     { section: 'Reports', items: [
       { id: 'reportDaily', label: 'Daily reports', icon: FileBarChart },
@@ -388,28 +402,97 @@ function mulberry32(seed) {
 
 /* ---------------------------------- calculations ---------------------------------- */
 
-function findSalaryStructure(rates, id) {
-  const list = rates.salaryStructures || [];
-  return list.find((s) => s.id === id) || list[0] || { label: 'Unknown', perDelivery: 0, petrol: 0 };
+/* ---- Phase B: effective-dated rates ----
+   Salary structures and revenue rates are stored as a small history array,
+   { perDelivery, petrol, effectiveFrom } / { rate, effectiveFrom }, so that
+   changing a rate today never rewrites what an already-issued payslip or
+   past revenue report shows — every calculation resolves the rate that was
+   actually in force on the entry's own date.
+
+   Older data (or a document that predates this feature) stores a flat
+   number/fields instead of a history array. The resolver functions below
+   fall back to that flat shape transparently, so no explicit migration
+   step is required — a structure/company only "upgrades" to the history
+   shape the first time someone uses Settings to change its rate. */
+
+// A safely-early sentinel date used only when upgrading an existing flat
+// rate to history shape for the first time — it represents "this was the
+// rate for as long as we have any record of it."
+const RATE_HISTORY_EPOCH = '2000-01-01';
+
+// Pick the history entry with the latest effectiveFrom that is <= dateISO.
+// If dateISO predates every entry (shouldn't normally happen), falls back
+// to the earliest entry rather than returning nothing.
+function resolveRateAt(history, dateISO) {
+  if (!history || history.length === 0) return null;
+  const target = dateISO || toISO(today());
+  const applicable = history.filter((h) => h.effectiveFrom <= target);
+  if (applicable.length) return applicable.reduce((latest, h) => (h.effectiveFrom > latest.effectiveFrom ? h : latest));
+  return history.reduce((earliest, h) => (h.effectiveFrom < earliest.effectiveFrom ? h : earliest));
 }
 
-function calcPayroll(delivered, employee, rates) {
+// Normalizes a salary structure or a company's revenue value to a history
+// array, wrapping a legacy flat shape into a single epoch-dated entry.
+function structureHistory(structure) {
+  if (structure.history && structure.history.length) return structure.history;
+  return [{ perDelivery: Number(structure.perDelivery) || 0, petrol: Number(structure.petrol) || 0, effectiveFrom: RATE_HISTORY_EPOCH }];
+}
+function revenueHistory(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'number') return [{ rate: value, effectiveFrom: RATE_HISTORY_EPOCH }];
+  return [];
+}
+
+// Inserts/replaces a history entry by effectiveFrom (picking a date that's
+// already there just edits that entry rather than creating a duplicate),
+// keeping the array sorted oldest-to-newest.
+function upsertHistoryEntry(history, entry) {
+  const idx = history.findIndex((h) => h.effectiveFrom === entry.effectiveFrom);
+  const next = idx >= 0 ? history.map((h, i) => (i === idx ? { ...h, ...entry } : h)) : [...history, entry];
+  return next.slice().sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom));
+}
+
+function findSalaryStructure(rates, id, dateISO) {
+  const list = rates.salaryStructures || [];
+  const structure = list.find((s) => s.id === id) || list[0];
+  if (!structure) return { id: null, label: 'Unknown', perDelivery: 0, petrol: 0 };
+  const resolved = resolveRateAt(structureHistory(structure), dateISO) || {};
+  return { id: structure.id, label: structure.label, perDelivery: Number(resolved.perDelivery) || 0, petrol: Number(resolved.petrol) || 0 };
+}
+
+function resolveRevenueRateAt(rates, company, dateISO) {
+  const value = rates.revenue ? rates.revenue[company] : undefined;
+  if (value === undefined || value === null) return 0;
+  const resolved = resolveRateAt(revenueHistory(value), dateISO) || {};
+  return Number(resolved.rate) || 0;
+}
+
+function calcPayroll(delivered, employee, rates, dateISO) {
   if (!employee) return { pay: 0, petrol: 0 };
-  const structure = findSalaryStructure(rates, employee.salaryMethod);
+  const structure = findSalaryStructure(rates, employee.salaryMethod, dateISO);
   return { pay: delivered * (Number(structure.perDelivery) || 0), petrol: Number(structure.petrol) || 0 };
 }
 
 function calcRevenue(entry, rates) {
-  return entry.delivered * (rates.revenue[entry.company] || 0);
+  return entry.delivered * resolveRevenueRateAt(rates, entry.company, entry.date);
+}
+
+// Phase E: entries submitted by an employee (Phase A) start life as "submitted" and only
+// count toward payroll/revenue once office staff approve them. Entries with no status at
+// all — every row created before this phase existed, and everything the office enters
+// directly — are treated as approved, so nothing already on record is affected.
+function isApprovedEntry(en) {
+  return !en.status || en.status === 'approved';
 }
 
 function aggregate(entriesList, empById, rates) {
   let assigned = 0, delivered = 0, failed = 0, revenue = 0, payroll = 0, petrol = 0;
   entriesList.forEach((en) => {
+    if (!isApprovedEntry(en)) return;
     assigned += en.assigned; delivered += en.delivered; failed += en.failed;
     revenue += calcRevenue(en, rates);
     const emp = empById[en.employeeId];
-    const { pay, petrol: p } = calcPayroll(en.delivered, emp, rates);
+    const { pay, petrol: p } = calcPayroll(en.delivered, emp, rates, en.date);
     payroll += pay; petrol += p;
   });
   const totalExpense = payroll + petrol;
@@ -419,7 +502,7 @@ function aggregate(entriesList, empById, rates) {
   return { assigned, delivered, failed, revenue, payroll, petrol, totalExpense, profit, successRate, margin };
 }
 
-function buildTrend(entriesList, empById, rates, start, end) {
+function buildTrend(entriesList, empById, rates, start, end, expensesList = []) {
   const spanDays = Math.round((end - start) / 86400000) + 1;
   let keyFn, labelFn;
   if (spanDays <= 31) {
@@ -433,16 +516,24 @@ function buildTrend(entriesList, empById, rates, start, end) {
     labelFn = (k) => k;
   }
   const map = new Map();
-  entriesList.forEach((en) => {
-    const d = fromISO(en.date);
-    const key = keyFn(d);
+  const bucket = (dateISO) => {
+    const key = keyFn(fromISO(dateISO));
     if (!map.has(key)) map.set(key, { key, delivered: 0, failed: 0, revenue: 0, expense: 0 });
-    const rec = map.get(key);
+    return map.get(key);
+  };
+  entriesList.forEach((en) => {
+    if (!isApprovedEntry(en)) return;
+    const rec = bucket(en.date);
     rec.delivered += en.delivered; rec.failed += en.failed;
     rec.revenue += calcRevenue(en, rates);
     const emp = empById[en.employeeId];
-    const { pay, petrol } = calcPayroll(en.delivered, emp, rates);
+    const { pay, petrol } = calcPayroll(en.delivered, emp, rates, en.date);
     rec.expense += pay + petrol;
+  });
+  // Phase F: fold in other expenses (rent, vehicle maintenance, etc.) so the
+  // trend's expense/profit lines reflect real running costs, not just payroll.
+  expensesList.forEach((ex) => {
+    bucket(ex.date).expense += Number(ex.amount) || 0;
   });
   return Array.from(map.values()).sort((a, b) => a.key.localeCompare(b.key))
     .map((r) => ({ ...r, label: labelFn(r.key), profit: r.revenue - r.expense }));
@@ -1175,13 +1266,18 @@ function SectionHeader({ title, subtitle, right }) {
 
 /* ---------------------------------- Dashboard page ---------------------------------- */
 
-function DashboardPage({ employees, entries, empById, rates }) {
+function DashboardPage({ employees, entries, empById, rates, expenses = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const t = today();
   const [mStart, mEnd] = [startOfMonth(t), endOfMonth(t)];
   const monthEntries = entries.filter((en) => inRange(en.date, mStart, mEnd));
+  const monthExpenses = expenses.filter((ex) => inRange(ex.date, mStart, mEnd));
   const overall = aggregate(monthEntries, empById, rates);
-  const trend = buildTrend(monthEntries, empById, rates, mStart, mEnd);
+  const otherExpenses = sumExpenses(monthExpenses);
+  overall.totalExpense += otherExpenses;
+  overall.profit -= otherExpenses;
+  overall.margin = overall.revenue ? (overall.profit / overall.revenue) * 100 : 0;
+  const trend = buildTrend(monthEntries, empById, rates, mStart, mEnd, monthExpenses);
 
   const activeEmp = employees.filter((e) => e.status === 'Active').length;
 
@@ -1261,7 +1357,7 @@ function DashboardPage({ employees, entries, empById, rates }) {
 /* ---------------------------------- Employee Management page ---------------------------------- */
 
 function emptyEmployeeForm(salaryStructures, companies) {
-  return { id: '', name: '', mobile: '', address: '', joiningDate: toISO(today()), company: companies?.[0] || '', salaryMethod: salaryStructures?.[0]?.id || '', status: 'Active', relievingDate: '', relievingReason: '', bankAccountName: '', bankAccountNumber: '', bankIfsc: '', upiId: '' };
+  return { id: '', name: '', mobile: '', address: '', hubLocation: '', joiningDate: toISO(today()), company: companies?.[0] || '', salaryMethod: salaryStructures?.[0]?.id || '', status: 'Active', relievingDate: '', relievingReason: '', bankAccountName: '', bankAccountNumber: '', bankIfsc: '', upiId: '', authUid: '' };
 }
 
 function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
@@ -1312,14 +1408,18 @@ function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
         <div>
           <label className="edm-label">Salary method</label>
           <select className="edm-select" value={form.salaryMethod} onChange={(e) => set('salaryMethod', e.target.value)}>
-            {(salaryStructures || []).map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.label} — ₹{s.perDelivery}/delivery{s.petrol ? ` + ₹${s.petrol} petrol` : ', no petrol'}
-              </option>
-            ))}
+            {(salaryStructures || []).map((s) => {
+              const current = findSalaryStructure({ salaryStructures }, s.id);
+              return (
+                <option key={s.id} value={s.id}>
+                  {s.label} — ₹{current.perDelivery}/delivery{current.petrol ? ` + ₹${current.petrol} petrol` : ', no petrol'}
+                </option>
+              );
+            })}
           </select>
         </div>
       </div>
+      <div><label className="edm-label">Hub location</label><input className="edm-input" value={form.hubLocation || ''} onChange={(e) => set('hubLocation', e.target.value)} placeholder="e.g. Whitefield hub" /></div>
       <div>
         <label className="edm-label">Status</label>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -1392,6 +1492,19 @@ function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
         <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '8px 0 0' }}>Provide either a UPI ID or full bank details — whichever this employee prefers for payout.</p>
       </div>
 
+      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, marginTop: 4 }}>
+        <label className="edm-label">Self-service login (optional)</label>
+        <input
+          className="edm-input font-mono"
+          value={form.authUid || ''}
+          onChange={(e) => set('authUid', e.target.value.trim())}
+          placeholder="Firebase Auth UID"
+        />
+        <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '6px 0 0' }}>
+          To let this employee submit their own daily deliveries from their phone: create a sign-in account for them in the Firebase console (same as any other user), then paste that account's UID here. Leave blank if office staff will keep entering their numbers.
+        </p>
+      </div>
+
       <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
         <button
           className="edm-btn edm-btn-amber"
@@ -1440,16 +1553,18 @@ function downloadJson(filename, data) {
 }
 
 // Bundles every piece of persisted app data into one exportable object.
-function buildBackupPayload({ companies, employees, entries, rates }) {
+function buildBackupPayload({ companies, employees, entries, rates, payments = [], expenses = [], reconciliations = [], auditLog = [] }) {
   return {
     schema: 'edm-backup',
     version: BACKUP_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
-    companies, employees, entries, rates,
+    companies, employees, entries, rates, payments, expenses, reconciliations, auditLog,
   };
 }
 
-// Basic shape check before trusting an imported file.
+// Basic shape check before trusting an imported file. payments/expenses/reconciliations/
+// auditLog are newer additions (Phases C/F/G/H) — treated as optional so a backup made
+// before those phases shipped still imports cleanly (missing arrays default to []).
 function validateBackupPayload(data) {
   if (!data || typeof data !== 'object') return 'File is not a valid backup (not a JSON object).';
   if (!Array.isArray(data.employees)) return 'File is missing an "employees" list.';
@@ -1459,7 +1574,7 @@ function validateBackupPayload(data) {
   return null;
 }
 
-function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
+function EmployeesPage({ employees, setEmployees, empById, entries, rates, logAction }) {
   const COMPANIES = useContext(CompaniesContext);
   const [modal, setModal] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
@@ -1472,7 +1587,8 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const methodLabel = (id) => {
     const s = salaryStructures.find((x) => x.id === id);
     if (!s) return '—';
-    return `${s.label} (₹${s.perDelivery}${s.petrol ? ' + petrol' : ''})`;
+    const current = findSalaryStructure(rates, id);
+    return `${s.label} (₹${current.perDelivery}${current.petrol ? ' + petrol' : ''})`;
   };
 
   const monthEntries = useMemo(() => entries.filter((en) => inRange(en.date, startOfMonth(today()), endOfMonth(today()))), [entries]);
@@ -1484,6 +1600,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
     { key: 'name', label: 'Name', getValue: (e) => e.name, filterType: 'text' },
     { key: 'mobile', label: 'Mobile', getValue: (e) => e.mobile, filterType: 'text' },
     { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'select', filterOptions: COMPANIES },
+    { key: 'hubLocation', label: 'Hub location', getValue: (e) => e.hubLocation || '', filterType: 'text' },
     { key: 'salaryMethod', label: 'Salary method', getValue: (e) => methodLabel(e.salaryMethod), filterType: 'text' },
     { key: 'bank', label: 'Bank / UPI', getValue: (e) => e.upiId || e.bankAccountNumber || e.bankAccountName || '', filterType: 'text' },
     { key: 'joiningDate', label: 'Joined', getValue: (e) => e.joiningDate, filterType: 'text' },
@@ -1493,12 +1610,13 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const visibleList = tableControls.apply(list, columns);
 
   const exportEmployeesCsv = () => {
-    const header = ['ID', 'Name', 'Mobile', 'Address', 'Company', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
+    const header = ['ID', 'Name', 'Mobile', 'Address', 'Company', 'Hub location', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
     const rows = visibleList.map((e) => {
       const s = salaryStructures.find((x) => x.id === e.salaryMethod);
+      const current = s ? findSalaryStructure(rates, e.salaryMethod) : null;
       return [
-        e.id, e.name, e.mobile, e.address, e.company,
-        s ? s.label : '—', s ? s.perDelivery : '', s ? s.petrol : '',
+        e.id, e.name, e.mobile, e.address, e.company, e.hubLocation || '',
+        s ? s.label : '—', current ? current.perDelivery : '', current ? current.petrol : '',
         e.joiningDate, e.status, e.relievingDate || '', e.relievingReason || '', deliveredThisMonth(e.id),
         e.upiId || '', e.bankAccountName || '', e.bankAccountNumber || '', e.bankIfsc || '',
       ];
@@ -1507,11 +1625,15 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   };
 
   const addEmployee = (form) => {
-    setEmployees((prev) => [...prev, { ...form, id: `e${uid()}` }]);
+    const record = { ...form, id: `e${uid()}` };
+    setEmployees((prev) => [...prev, record]);
+    logAction && logAction('create', 'employee', record.id, null, record);
     setModal(null);
   };
   const updateEmployee = (form) => {
+    const before = employees.find((e) => e.id === form.id);
     setEmployees((prev) => prev.map((e) => (e.id === form.id ? form : e)));
+    logAction && logAction('update', 'employee', form.id, before, form);
     setModal(null);
   };
   const { toast, showUndo, dismiss } = useUndoToast();
@@ -1521,6 +1643,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
     setEmployees((prev) => prev.filter((e) => e.id !== id));
     setDeleteId(null);
     if (removed) {
+      logAction && logAction('delete', 'employee', id, removed, null);
       showUndo(`Deleted ${removed.name}`, () => {
         setEmployees((prev) => {
           if (prev.some((e) => e.id === removed.id)) return prev;
@@ -1570,6 +1693,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
                 <td className="font-mono">{e.mobile}</td>
                 <td>{e.company}</td>
+                <td style={{ color: e.hubLocation ? 'var(--text)' : 'var(--text-muted)' }}>{e.hubLocation || '—'}</td>
                 <td>{methodLabel(e.salaryMethod)}</td>
                 <td><BankCell employee={e} /></td>
                 <td>{e.joiningDate}</td>
@@ -1583,7 +1707,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 </td>
               </tr>
             ))}
-            {visibleList.length === 0 && <tr><td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
+            {visibleList.length === 0 && <tr><td colSpan={11} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1614,7 +1738,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
 
 /* ---------------------------------- Inactive Employees page ---------------------------------- */
 
-function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
+function InactiveEmployeesPage({ employees, setEmployees, empById, rates, logAction }) {
   const COMPANIES = useContext(CompaniesContext);
   const [companyFilter, setCompanyFilter] = useState('All');
   const [modal, setModal] = useState(null);
@@ -1624,7 +1748,9 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
   const salaryStructures = rates.salaryStructures || [];
   const methodLabel = (id) => {
     const s = salaryStructures.find((x) => x.id === id);
-    return s ? `${s.label} (₹${s.perDelivery}${s.petrol ? ' + petrol' : ''})` : '—';
+    if (!s) return '—';
+    const current = findSalaryStructure(rates, id);
+    return `${s.label} (₹${current.perDelivery}${current.petrol ? ' + petrol' : ''})`;
   };
 
   const list = employees
@@ -1653,7 +1779,9 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
   };
 
   const updateEmployee = (form) => {
+    const before = employees.find((e) => e.id === form.id);
     setEmployees((prev) => prev.map((e) => (e.id === form.id ? form : e)));
+    logAction && logAction('update', 'employee', form.id, before, form);
     setModal(null);
   };
 
@@ -1661,6 +1789,7 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
     const previous = employees.find((e) => e.id === id);
     if (!previous) return;
     setEmployees((prev) => prev.map((e) => (e.id === id ? { ...e, status: 'Active', relievingDate: '', relievingReason: '' } : e)));
+    logAction && logAction('reactivate', 'employee', id, previous, { ...previous, status: 'Active' });
     showUndo(`${previous.name} marked active again`, () => {
       setEmployees((prev) => prev.map((e) => (e.id === id ? previous : e)));
     });
@@ -1672,6 +1801,7 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
     setEmployees((prev) => prev.filter((e) => e.id !== id));
     setDeleteId(null);
     if (removed) {
+      logAction && logAction('delete', 'employee', id, removed, null);
       showUndo(`Deleted ${removed.name}`, () => {
         setEmployees((prev) => {
           if (prev.some((e) => e.id === removed.id)) return prev;
@@ -1790,7 +1920,9 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
     const assigned = Number(row.assigned) || 0;
     const delivered = Math.min(assigned, Number(row.delivered) || 0);
     const failed = Math.max(0, assigned - delivered);
-    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '' };
+    // Office-entered rows count as approved immediately (Phase E) — the approval gate only
+    // applies to an employee's own self-submission (Phase A).
+    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '', status: 'approved' };
     setEntries((prev) => {
       const idx = prev.findIndex((en) => en.id === record.id);
       if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
@@ -1875,13 +2007,58 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
   );
 }
 
-function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
+// Phase E: rejecting a self-submitted entry requires a reason, so the employee knows what
+// to fix before resubmitting.
+function RejectReasonModal({ entry, employeeName, onReject, onClose }) {
+  const [note, setNote] = useState('');
+  return (
+    <Modal title={`Reject ${employeeName}'s submission`} onClose={onClose} width={380}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+          The employee will see this reason on their submissions list and can resubmit.
+        </p>
+        <div>
+          <label className="edm-label">Reason</label>
+          <input className="edm-input" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. numbers don't match the hub scan sheet" autoFocus />
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+          <button
+            className="edm-btn"
+            style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff', opacity: note.trim() ? 1 : 0.5, cursor: note.trim() ? 'pointer' : 'not-allowed' }}
+            disabled={!note.trim()}
+            onClick={() => onReject(entry.id, note.trim())}
+          >
+            Reject submission
+          </button>
+          <button className="edm-btn edm-btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function DailyEntryPage({ employees, entries, setEntries, empById, rates, currentUser, logAction }) {
   const COMPANIES = useContext(CompaniesContext);
   const [date, setDate] = useState(toISO(today()));
   const [company, setCompany] = useState('All');
   const [modal, setModal] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
   const [monthModalOpen, setMonthModalOpen] = useState(false);
+  const [rejectTarget, setRejectTarget] = useState(null); // entry awaiting a rejection reason
+
+  // Phase E: entries an employee submitted themselves (Phase A) sit here until office staff
+  // approve or reject them — shown regardless of the date/company filters above so nothing
+  // gets missed just because it's not for "today".
+  const pendingEntries = entries.filter((en) => en.status === 'submitted');
+  const approveEntry = (id) => {
+    setEntries((prev) => prev.map((en) => (en.id === id ? { ...en, status: 'approved', reviewedBy: currentUser?.username, reviewedAt: new Date().toISOString(), reviewNote: '' } : en)));
+    logAction && logAction('approve', 'entry', id, null, null);
+  };
+  const rejectEntry = (id, note) => {
+    setEntries((prev) => prev.map((en) => (en.id === id ? { ...en, status: 'rejected', reviewedBy: currentUser?.username, reviewedAt: new Date().toISOString(), reviewNote: note } : en)));
+    logAction && logAction('reject', 'entry', id, null, { reviewNote: note });
+    setRejectTarget(null);
+  };
 
   const dayEntries = entries.filter((en) => en.date === date && (company === 'All' || en.company === company));
   const dayAgg = aggregate(dayEntries, empById, rates);
@@ -1971,7 +2148,8 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
     const assigned = Number(form.assigned) || 0;
     const delivered = Math.min(assigned, Number(form.delivered) || 0);
     const failed = Math.max(0, assigned - delivered);
-    const record = { ...form, assigned, delivered, failed };
+    // Office-entered/edited rows count as approved immediately (Phase E).
+    const record = { ...form, assigned, delivered, failed, status: 'approved' };
     setEntries((prev) => {
       const idx = prev.findIndex((en) => en.id === record.id);
       if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
@@ -2018,6 +2196,44 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
           </div>
         }
       />
+
+      {pendingEntries.length > 0 && (
+        <div className="edm-card" style={{ padding: 16, marginBottom: 16, borderLeft: '4px solid var(--amber)' }}>
+          <h3 className="font-display" style={{ fontSize: 14, fontWeight: 700, margin: '0 0 2px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            Pending review
+            <span className="edm-badge" style={{ background: 'var(--amber)', color: '#2A1B05' }}>{pendingEntries.length}</span>
+          </h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 10px' }}>Submitted by employees from their own phones — approve or reject before it counts toward payroll or revenue.</p>
+          <div className="edm-scroll" style={{ overflowX: 'auto' }}>
+            <table className="edm-table">
+              <thead><tr><th>Date</th><th>Employee</th><th>Company</th><th>Assigned</th><th>Delivered</th><th>Remarks</th><th>Proof</th><th></th></tr></thead>
+              <tbody>
+                {pendingEntries.map((en) => (
+                  <tr key={en.id}>
+                    <td>{en.date}</td>
+                    <td style={{ fontWeight: 600 }}>{empById[en.employeeId]?.name || 'Unknown'}</td>
+                    <td>{en.company}</td>
+                    <td className="font-mono">{en.assigned}</td>
+                    <td className="font-mono">{en.delivered}</td>
+                    <td style={{ color: 'var(--text-muted)' }}>{en.remarks || '—'}</td>
+                    <td>
+                      {en.proofUrl
+                        ? <a href={en.proofUrl} target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--navy)' }}><Camera size={14} /> View</a>
+                        : <span style={{ color: 'var(--text-muted)' }}>—</span>}
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button className="edm-btn edm-btn-amber" style={{ padding: '5px 10px', fontSize: 12 }} onClick={() => approveEntry(en.id)}>Approve</button>
+                        <button className="edm-btn edm-btn-danger-ghost" style={{ padding: '5px 10px', fontSize: 12 }} onClick={() => setRejectTarget(en)}>Reject</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="edm-card" style={{ padding: 14, display: 'flex', gap: 14, alignItems: 'flex-end', marginBottom: 16, flexWrap: 'wrap' }}>
         <div><label className="edm-label">Date</label><input type="date" className="edm-input" value={date} onChange={(e) => setDate(e.target.value)} /></div>
@@ -2081,7 +2297,14 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                     <td className="no-print">
                       <input type="checkbox" checked={isSelected} onChange={() => toggleOne(en.id)} />
                     </td>
-                    <td style={{ fontWeight: 600 }}>{emp ? emp.name : 'Unknown'}</td>
+                    <td style={{ fontWeight: 600 }}>
+                      {emp ? emp.name : 'Unknown'}
+                      {en.proofUrl && (
+                        <a href={en.proofUrl} target="_blank" rel="noopener noreferrer" className="no-print" title="View proof photo" style={{ marginLeft: 6, color: 'var(--text-muted)', display: 'inline-flex', verticalAlign: 'middle' }}>
+                          <Camera size={12} />
+                        </a>
+                      )}
+                    </td>
                     <td className="font-mono">{en.assigned}</td>
                     <td className="font-mono" style={{ color: 'var(--teal-dark)' }}>{en.delivered}</td>
                     <td className="font-mono" style={{ color: 'var(--danger)' }}>{en.failed}</td>
@@ -2129,6 +2352,14 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
             <button className="edm-btn edm-btn-ghost" onClick={() => setDeleteId(null)}>Cancel</button>
           </div>
         </Modal>
+      )}
+      {rejectTarget && (
+        <RejectReasonModal
+          entry={rejectTarget}
+          employeeName={empById[rejectTarget.employeeId]?.name || 'this employee'}
+          onReject={rejectEntry}
+          onClose={() => setRejectTarget(null)}
+        />
       )}
       <UndoToast toast={toast} onDismiss={dismiss} />
     </div>
@@ -2242,7 +2473,9 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
     const assigned = Number(row.assigned) || 0;
     const delivered = Math.min(assigned, Number(row.delivered) || 0);
     const failed = Math.max(0, assigned - delivered);
-    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '' };
+    // Office-entered rows count as approved immediately (Phase E) — the approval gate only
+    // applies to an employee's own self-submission (Phase A).
+    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '', status: 'approved' };
     setEntries((prev) => {
       const idx = prev.findIndex((en) => en.id === record.id);
       if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
@@ -2360,7 +2593,7 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
 
 /* ---------------------------------- Revenue page (per company) ---------------------------------- */
 
-function RevenuePage({ company, employees, entries, empById, rates }) {
+function RevenuePage({ company, employees, entries, empById, rates, reconciliations = [] }) {
   const [preset, setPreset] = useState('thisMonth');
   const [customStart, setCustomStart] = useState(toISO(today()));
   const [customEnd, setCustomEnd] = useState(toISO(today()));
@@ -2369,6 +2602,9 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
   const [start, end] = getRange(preset, customStart, customEnd);
   const companyEmployees = employees.filter((e) => e.company === company);
   const filtered = entries.filter((en) => en.company === company && inRange(en.date, start, end) && (employeeFilter === 'All' || en.employeeId === employeeFilter));
+
+  // Phase G: flag an unexplained reconciliation gap for exactly this company + range.
+  const openReconciliation = reconciliations.find((r) => r.company === company && r.periodStart === toISO(start) && r.periodEnd === toISO(end) && r.adjustment !== 0);
 
   const t = today();
   const dayAgg = aggregate(entries.filter((en) => en.company === company && en.date === toISO(t)), empById, rates);
@@ -2396,7 +2632,14 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
 
   return (
     <div>
-      <SectionHeader title={`${company} — revenue`} subtitle={`₹${rates.revenue[company]} per successful delivery`} />
+      <SectionHeader title={`${company} — revenue`} subtitle={`₹${resolveRevenueRateAt(rates, company)} per successful delivery (current rate)`} />
+
+      {openReconciliation && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: '#FDF1E7', border: '1px solid var(--amber)', borderRadius: 8, padding: '10px 12px', marginBottom: 16, fontSize: 12.5, color: '#7A4A0A' }}>
+          <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+          Unexplained reconciliation gap for this period: company reported {openReconciliation.companyReportedCount}, system shows {openReconciliation.systemCount} ({openReconciliation.adjustment > 0 ? '+' : ''}{openReconciliation.adjustment}). See Reconciliation.
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 14, marginBottom: 20 }}>
         <MetricCard label="Today" value={inr(dayAgg.revenue)} sub={`${dayAgg.delivered} delivered`} tone="teal" icon={TrendingUp} />
@@ -2427,7 +2670,7 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
           <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 14px' }}>Selected range</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>Delivered</span><span className="font-mono" style={{ fontWeight: 600 }}>{rangeAgg.delivered}</span></div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>Rate / delivery</span><span className="font-mono" style={{ fontWeight: 600 }}>{inr(rates.revenue[company])}</span></div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: 'var(--text-muted)' }}>Rate / delivery (current)</span><span className="font-mono" style={{ fontWeight: 600 }}>{inr(resolveRevenueRateAt(rates, company))}</span></div>
             <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ fontWeight: 600 }}>Total revenue</span><span className="font-mono" style={{ fontWeight: 700, fontSize: 16 }}>{inr(rangeAgg.revenue)}</span></div>
           </div>
@@ -2469,14 +2712,25 @@ function periodLabelForRange(start, end) {
 // Generic payslip calculation over any date range. `periodType` is one of
 // 'monthly' | 'weekly' | 'daily' | 'custom' and is used only for display/labels.
 function computePayslipForRange(employee, entries, rates, start, end, periodType = 'custom') {
-  const es = entries.filter((en) => en.employeeId === employee.id && inRange(en.date, start, end));
+  // Only approved entries count toward pay (Phase E) — a pending/rejected self-submission
+  // shouldn't inflate a payslip until office staff have reviewed it.
+  const es = entries.filter((en) => en.employeeId === employee.id && inRange(en.date, start, end) && isApprovedEntry(en));
   const workingDays = es.length;
   const assigned = es.reduce((s, en) => s + en.assigned, 0);
   const delivered = es.reduce((s, en) => s + en.delivered, 0);
   const failed = es.reduce((s, en) => s + en.failed, 0);
-  const structure = findSalaryStructure(rates, employee.salaryMethod);
-  const { pay, petrol: petrolPerDay } = calcPayroll(delivered, employee, rates);
-  const petrol = petrolPerDay * workingDays;
+  // Sum pay/petrol per entry, resolving whatever rate was effective on that entry's own date —
+  // so a mid-period rate change (Phase B) only affects the days it actually applied to.
+  let pay = 0, petrol = 0;
+  es.forEach((en) => {
+    const r = calcPayroll(en.delivered, employee, rates, en.date);
+    pay += r.pay; petrol += r.petrol;
+  });
+  // "Current" structure/rate shown on the slip header is just for display — informational,
+  // resolved as of the period end date; the totals above are already correct even if the
+  // rate changed partway through the period.
+  const structure = findSalaryStructure(rates, employee.salaryMethod, toISO(end));
+  const petrolPerDay = structure.petrol;
   const periodKey = toISO(start) === toISO(end) ? toISO(start) : `${toISO(start)}_to_${toISO(end)}`;
   return {
     employee, periodType, start, end,
@@ -2541,7 +2795,7 @@ function downloadAllPayslipsCsv(employees, entries, rates, start, end, periodTyp
   downloadCsv(`payslips_${periodKey}.csv`, [header, ...rows]);
 }
 
-function PayslipsTab({ employees, entries, rates }) {
+function PayslipsTab({ employees, entries, rates, payments = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const [periodType, setPeriodType] = useState('monthly'); // monthly | weekly | daily | custom
   const [month, setMonth] = useState(currentMonthStr());
@@ -2569,6 +2823,7 @@ function PayslipsTab({ employees, entries, rates }) {
   else { start = fromISO(customStart); end = fromISO(customEnd) < start ? start : fromISO(customEnd); }
 
   const slip = employee ? computePayslipForRange(employee, entries, rates, start, end, periodType) : null;
+  const slipPayment = slip ? findPayment(payments, employee.id, toISO(start), toISO(end)) : null;
 
   const shiftWeek = (delta) => setWeekAnchor(toISO(addDays(fromISO(weekAnchor), delta * 7)));
   const shiftDay = (delta) => setDay(toISO(addDays(fromISO(day), delta)));
@@ -2671,6 +2926,15 @@ function PayslipsTab({ employees, entries, rates }) {
         <div className="payslip-print-area">
           <div className="payslip-sheet">
             <img className="payslip-watermark" src={LOGO_DATA_URI} alt="" />
+            {slipPayment && (
+              <div style={{
+                position: 'absolute', top: 24, right: 32, zIndex: 3, transform: 'rotate(-8deg)',
+                border: '3px solid var(--teal-dark)', color: 'var(--teal-dark)', borderRadius: 8,
+                padding: '4px 14px', fontWeight: 800, fontSize: 20, letterSpacing: '.08em', opacity: 0.75,
+              }}>
+                PAID
+              </div>
+            )}
             <div className="payslip-content">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 22, borderBottom: '2px solid var(--navy)', paddingBottom: 16 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -2685,6 +2949,7 @@ function PayslipsTab({ employees, entries, rates }) {
                   <div className="font-display" style={{ fontSize: 15, fontWeight: 700 }}>{slip.periodLabel}</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Generated {toISO(today())}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)' }} className="font-mono">{payslipNumber(slip)}</div>
+                  {slipPayment && <div style={{ fontSize: 11, color: 'var(--teal-dark)', fontWeight: 600 }}>Paid {new Date(slipPayment.paidAt).toLocaleDateString('en-IN')}</div>}
                 </div>
               </div>
 
@@ -2734,7 +2999,13 @@ function PayslipsTab({ employees, entries, rates }) {
 
 /* ---------------------------------- Salary Management page ---------------------------------- */
 
-function SalaryPage({ employees, entries, rates }) {
+// Phase C: a payment is "the same" period for an employee if it covers the exact same
+// [periodStart, periodEnd] — matches regardless of which preset label produced that range.
+function findPayment(payments, employeeId, periodStart, periodEnd) {
+  return payments.find((p) => p.employeeId === employeeId && p.periodStart === periodStart && p.periodEnd === periodEnd);
+}
+
+function SalaryPage({ employees, entries, rates, payments = [], setPayments, currentUser, logAction }) {
   const COMPANIES = useContext(CompaniesContext);
   const [tab, setTab] = useState('overview');
   const [preset, setPreset] = useState('thisMonth');
@@ -2742,25 +3013,59 @@ function SalaryPage({ employees, entries, rates }) {
   const [customEnd, setCustomEnd] = useState(toISO(today()));
   const [companyFilter, setCompanyFilter] = useState('All');
   const [statusFilter, setStatusFilter] = useState('All');
-  const [paidIds, setPaidIds] = useState(() => new Set()); // session-only "marked as paid" markers — see note below
   const [payoutTarget, setPayoutTarget] = useState(null); // employee row currently open in the "Disburse" modal
+  const { toast, showUndo, dismiss } = useUndoToast();
 
   const [start, end] = getRange(preset, customStart, customEnd);
+  const periodStart = toISO(start), periodEnd = toISO(end);
   const list = employees.filter((e) => (companyFilter === 'All' || e.company === companyFilter) && (statusFilter === 'All' || e.status === statusFilter));
   const inactiveCount = employees.filter((e) => e.status === 'Inactive').length;
 
   const rows = list.map((e) => {
-    const es = entries.filter((en) => en.employeeId === e.id && inRange(en.date, start, end));
+    // Only approved entries count toward pay (Phase E).
+    const es = entries.filter((en) => en.employeeId === e.id && inRange(en.date, start, end) && isApprovedEntry(en));
     const delivered = es.reduce((s, en) => s + en.delivered, 0);
     const days = es.length;
-    const { pay, petrol: petrolPerDay } = calcPayroll(delivered, e, rates);
-    const petrol = petrolPerDay * days;
-    return { ...e, delivered, days, pay, petrol, total: pay + petrol };
+    // Sum per entry so a mid-range rate change (Phase B) only affects the days it applied to.
+    let pay = 0, petrol = 0;
+    es.forEach((en) => {
+      const r = calcPayroll(en.delivered, e, rates, en.date);
+      pay += r.pay; petrol += r.petrol;
+    });
+    const paidRecord = findPayment(payments, e.id, periodStart, periodEnd);
+    return { ...e, delivered, days, pay, petrol, total: pay + petrol, paidRecord };
   });
 
   const totals = rows.reduce((acc, r) => ({ pay: acc.pay + r.pay, petrol: acc.petrol + r.petrol, total: acc.total + r.total, delivered: acc.delivered + r.delivered }), { pay: 0, petrol: 0, total: 0, delivered: 0 });
 
-  const markPaid = (id) => setPaidIds((prev) => new Set(prev).add(id));
+  // "Mark as paid" writes a real, shared, permanent record instead of local component
+  // state — so it's visible on every device and survives a reload, preventing the same
+  // employee/period from being paid twice by accident.
+  const confirmPaid = () => {
+    if (!payoutTarget) return;
+    const record = {
+      id: uid(),
+      employeeId: payoutTarget.id,
+      periodType: preset,
+      periodStart, periodEnd,
+      amount: payoutTarget.total,
+      paidAt: new Date().toISOString(),
+      paidBy: currentUser ? currentUser.username : null,
+      method: payoutTarget.upiId ? 'UPI' : 'Bank transfer',
+      note: '',
+    };
+    setPayments((prev) => [...prev, record]);
+    logAction && logAction('mark_paid', 'payment', record.id, null, record);
+    setPayoutTarget(null);
+  };
+
+  const unmarkPaid = (record, employeeName) => {
+    setPayments((prev) => prev.filter((p) => p.id !== record.id));
+    logAction && logAction('unmark_paid', 'payment', record.id, record, null);
+    showUndo(`Unmarked ${employeeName} as paid`, () => {
+      setPayments((prev) => (prev.some((p) => p.id === record.id) ? prev : [...prev, record]));
+    });
+  };
 
   const tableControls = useTableControls();
   const salaryColumns = [
@@ -2805,7 +3110,7 @@ function SalaryPage({ employees, entries, rates }) {
       />
 
       {tab === 'payslips' ? (
-        <PayslipsTab employees={employees} entries={entries} rates={rates} />
+        <PayslipsTab employees={employees} entries={entries} rates={rates} payments={payments} />
       ) : (
       <>
       <FilterBar preset={preset} setPreset={setPreset} customStart={customStart} customEnd={customEnd} setCustomStart={setCustomStart} setCustomEnd={setCustomEnd}
@@ -2828,12 +3133,15 @@ function SalaryPage({ employees, entries, rates }) {
       </div>
 
       <div className="edm-card" style={{ padding: 16, marginBottom: 16, display: 'flex', gap: 24, flexWrap: 'wrap', fontSize: 13 }}>
-        {(rates.salaryStructures || []).map((s) => (
-          <div key={s.id}>
-            <span style={{ color: 'var(--text-muted)' }}>{s.label}: </span>
-            <span style={{ fontWeight: 600 }}>₹{s.perDelivery} per delivery{s.petrol ? ` + ₹${s.petrol} petrol / working day` : ', no petrol'}</span>
-          </div>
-        ))}
+        {(rates.salaryStructures || []).map((s) => {
+          const current = findSalaryStructure(rates, s.id);
+          return (
+            <div key={s.id}>
+              <span style={{ color: 'var(--text-muted)' }}>{s.label}: </span>
+              <span style={{ fontWeight: 600 }}>₹{current.perDelivery} per delivery{current.petrol ? ` + ₹${current.petrol} petrol / working day` : ', no petrol'}</span>
+            </div>
+          );
+        })}
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
@@ -2861,8 +3169,22 @@ function SalaryPage({ employees, entries, rates }) {
                 <td className="font-mono" style={{ fontWeight: 700 }}>{inr(r.total)}</td>
                 <td><BankCell employee={r} /></td>
                 <td>
-                  {paidIds.has(r.id) ? (
-                    <span className="edm-badge edm-badge-active"><CheckCircle2 size={11} /> Paid</span>
+                  {r.paidRecord ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                      <span className="edm-badge edm-badge-active" style={{ width: 'fit-content' }}>
+                        <CheckCircle2 size={11} /> Paid {new Date(r.paidRecord.paidAt).toLocaleDateString('en-IN')}
+                      </span>
+                      <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                        by {r.paidRecord.paidBy || 'unknown'}
+                        {' · '}
+                        <button
+                          style={{ background: 'none', border: 'none', padding: 0, color: 'var(--danger)', cursor: 'pointer', fontSize: 10.5, textDecoration: 'underline' }}
+                          onClick={() => unmarkPaid(r.paidRecord, r.name)}
+                        >
+                          Unmark
+                        </button>
+                      </span>
+                    </div>
                   ) : (
                     <button
                       className="edm-btn edm-btn-ghost"
@@ -2918,7 +3240,7 @@ function SalaryPage({ employees, entries, rates }) {
             </p>
 
             <div style={{ display: 'flex', gap: 8 }}>
-              <button className="edm-btn edm-btn-primary" style={{ flex: 1, justifyContent: 'center' }} onClick={() => { markPaid(payoutTarget.id); setPayoutTarget(null); }}>
+              <button className="edm-btn edm-btn-primary" style={{ flex: 1, justifyContent: 'center' }} onClick={confirmPaid}>
                 Mark as paid
               </button>
               <button className="edm-btn edm-btn-ghost" onClick={() => setPayoutTarget(null)}>Cancel</button>
@@ -2926,6 +3248,7 @@ function SalaryPage({ employees, entries, rates }) {
           </div>
         </Modal>
       )}
+      <UndoToast toast={toast} onDismiss={dismiss} />
     </div>
   );
 }
@@ -2939,7 +3262,7 @@ const REPORT_META = {
   yearly: { title: 'Yearly reports', subtitle: 'Annual overview with monthly comparison', defaultPreset: 'thisYear' },
 };
 
-function ReportPage({ level, employees, entries, empById, rates }) {
+function ReportPage({ level, employees, entries, empById, rates, expenses = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const meta = REPORT_META[level];
   const [preset, setPreset] = useState(meta.defaultPreset);
@@ -2959,9 +3282,14 @@ function ReportPage({ level, employees, entries, empById, rates }) {
     (companyFilter === 'All' || en.company === companyFilter) &&
     (employeeFilter === 'All' || en.employeeId === employeeFilter)
   );
+  const filteredExpenses = expenses.filter((ex) => inRange(ex.date, start, end) && (companyFilter === 'All' || !ex.company || ex.company === companyFilter));
 
   const overall = aggregate(filtered, empById, rates);
-  const trend = buildTrend(filtered, empById, rates, start, end);
+  const otherExpenses = sumExpenses(filteredExpenses);
+  overall.totalExpense += otherExpenses;
+  overall.profit -= otherExpenses;
+  overall.margin = overall.revenue ? (overall.profit / overall.revenue) * 100 : 0;
+  const trend = buildTrend(filtered, empById, rates, start, end, filteredExpenses);
 
   const empPerf = employees.map((e) => {
     const es = filtered.filter((en) => en.employeeId === e.id);
@@ -3090,7 +3418,13 @@ function ReportPage({ level, employees, entries, empById, rates }) {
 
 /* ---------------------------------- Profit & Loss page ---------------------------------- */
 
-function PnLPage({ employees, entries, empById, rates }) {
+// Phase F: sums an expenses array's amounts — kept separate from aggregate() since
+// expenses aren't tied to a delivery entry, only to a date (and optionally a company).
+function sumExpenses(expensesList) {
+  return expensesList.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+}
+
+function PnLPage({ employees, entries, empById, rates, expenses = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const [preset, setPreset] = useState('thisMonth');
   const [customStart, setCustomStart] = useState(toISO(today()));
@@ -3101,7 +3435,18 @@ function PnLPage({ employees, entries, empById, rates }) {
   const filtered = entries.filter((en) => inRange(en.date, start, end) && (companyFilter === 'All' || en.company === companyFilter));
   const a = aggregate(filtered, empById, rates);
 
-  const companyRows = COMPANIES.map((c) => ({ company: c, ...aggregate(filtered.filter((en) => en.company === c), empById, rates) }));
+  const filteredExpenses = expenses.filter((e) => inRange(e.date, start, end) && (companyFilter === 'All' || !e.company || e.company === companyFilter));
+  const otherExpenses = sumExpenses(filteredExpenses);
+  const totalExpenseAll = a.totalExpense + otherExpenses;
+  const profitAll = a.revenue - totalExpenseAll;
+  const marginAll = a.revenue ? (profitAll / a.revenue) * 100 : 0;
+
+  const companyRows = COMPANIES.map((c) => {
+    const agg = aggregate(filtered.filter((en) => en.company === c), empById, rates);
+    const companyExpenses = sumExpenses(expenses.filter((e) => inRange(e.date, start, end) && e.company === c));
+    const totalExpense = agg.totalExpense + companyExpenses;
+    return { company: c, ...agg, totalExpense, profit: agg.revenue - totalExpense };
+  });
 
   const Row = ({ label, value, bold, tone }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #EEF0F2' }}>
@@ -3112,7 +3457,7 @@ function PnLPage({ employees, entries, empById, rates }) {
 
   return (
     <div>
-      <SectionHeader title="Profit and loss" subtitle="Revenue minus salary expense, for the selected period" />
+      <SectionHeader title="Profit and loss" subtitle="Revenue minus salary, petrol, and other expenses, for the selected period" />
 
       <FilterBar preset={preset} setPreset={setPreset} customStart={customStart} customEnd={customEnd} setCustomStart={setCustomStart} setCustomEnd={setCustomEnd}
         employeeFilter="All" setEmployeeFilter={() => {}} employees={[]} showEmployee={false}
@@ -3124,13 +3469,14 @@ function PnLPage({ employees, entries, empById, rates }) {
           <Row label="Revenue" value={inr(a.revenue)} tone="teal" />
           <Row label="Payroll" value={`(${inr(a.payroll)})`} />
           <Row label="Petrol allowance" value={`(${inr(a.petrol)})`} />
-          <Row label="Total expenses" value={`(${inr(a.totalExpense)})`} />
+          <Row label="Other expenses" value={`(${inr(otherExpenses)})`} />
+          <Row label="Total expenses" value={`(${inr(totalExpenseAll)})`} />
           <div style={{ paddingTop: 12 }}>
-            <Row label="Net profit" value={inr(a.profit)} bold tone={a.profit >= 0 ? 'teal' : 'danger'} />
+            <Row label="Net profit" value={inr(profitAll)} bold tone={profitAll >= 0 ? 'teal' : 'danger'} />
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 10 }}>
             <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Profit margin</span>
-            <span className="font-mono" style={{ fontWeight: 700 }}>{pct(a.margin)}</span>
+            <span className="font-mono" style={{ fontWeight: 700 }}>{pct(marginAll)}</span>
           </div>
         </div>
 
@@ -3153,15 +3499,397 @@ function PnLPage({ employees, entries, empById, rates }) {
               </div>
             ))}
           </div>
+          {otherExpenses > 0 && companyFilter === 'All' && (
+            <p style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 12, marginBottom: 0 }}>
+              Company-agnostic expenses (no company set) are included in the overall statement total but not split across companies above.
+            </p>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
+/* ---------------------------------- Expenses page (Phase F) ---------------------------------- */
+
+function emptyExpenseForm(categories) {
+  return { id: '', date: toISO(today()), category: categories?.[0] || '', amount: '', company: '', note: '' };
+}
+
+function ExpenseForm({ initial, categories, onSave, onClose }) {
+  const COMPANIES = useContext(CompaniesContext);
+  const [form, setForm] = useState(initial);
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  return (
+    <Modal title={initial.id ? 'Edit expense' : 'Add expense'} onClose={onClose}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div><label className="edm-label">Date</label><input type="date" className="edm-input" value={form.date} onChange={(e) => set('date', e.target.value)} /></div>
+          <div>
+            <label className="edm-label">Category</label>
+            <select className="edm-select" value={form.category} onChange={(e) => set('category', e.target.value)}>
+              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div><label className="edm-label">Amount (₹)</label><input type="number" min="0" className="edm-input" value={form.amount} onChange={(e) => set('amount', e.target.value)} placeholder="0" /></div>
+          <div>
+            <label className="edm-label">Company (optional)</label>
+            <select className="edm-select" value={form.company} onChange={(e) => set('company', e.target.value)}>
+              <option value="">— Not company-specific —</option>
+              {COMPANIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        </div>
+        <div><label className="edm-label">Note (optional)</label><input className="edm-input" value={form.note} onChange={(e) => set('note', e.target.value)} placeholder="What was this for" /></div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+          <button
+            className="edm-btn edm-btn-amber"
+            style={{ flex: 1, justifyContent: 'center' }}
+            onClick={() => form.category && form.amount !== '' && onSave({ ...form, id: form.id || uid(), amount: Number(form.amount) || 0 })}
+          >
+            Save expense
+          </button>
+          <button className="edm-btn edm-btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function ExpensesPage({ expenses, setExpenses, categories, logAction }) {
+  const COMPANIES = useContext(CompaniesContext);
+  const [preset, setPreset] = useState('thisMonth');
+  const [customStart, setCustomStart] = useState(toISO(today()));
+  const [customEnd, setCustomEnd] = useState(toISO(today()));
+  const [companyFilter, setCompanyFilter] = useState('All');
+  const [categoryFilter, setCategoryFilter] = useState('All');
+  const [modal, setModal] = useState(null);
+  const [deleteId, setDeleteId] = useState(null);
+  const { toast, showUndo, dismiss } = useUndoToast();
+
+  const [start, end] = getRange(preset, customStart, customEnd);
+  const list = expenses.filter((e) =>
+    inRange(e.date, start, end)
+    && (companyFilter === 'All' || e.company === companyFilter)
+    && (categoryFilter === 'All' || e.category === categoryFilter)
+  );
+
+  const tableControls = useTableControls();
+  const columns = [
+    { key: 'date', label: 'Date', getValue: (e) => e.date, filterType: 'text' },
+    { key: 'category', label: 'Category', getValue: (e) => e.category, filterType: 'select', filterOptions: categories },
+    { key: 'company', label: 'Company', getValue: (e) => e.company || '', filterType: 'select', filterOptions: COMPANIES },
+    { key: 'amount', label: 'Amount', getValue: (e) => Number(e.amount) || 0, filterType: 'text' },
+    { key: 'note', label: 'Note', getValue: (e) => e.note || '', filterType: 'text' },
+  ];
+  const visibleList = tableControls.apply(list, columns);
+  const total = sumExpenses(visibleList);
+
+  const addExpense = (form) => {
+    setExpenses((prev) => [...prev, form]);
+    logAction && logAction('create', 'expense', form.id, null, form);
+    setModal(null);
+  };
+  const updateExpense = (form) => {
+    setExpenses((prev) => prev.map((e) => (e.id === form.id ? form : e)));
+    logAction && logAction('update', 'expense', form.id, null, form);
+    setModal(null);
+  };
+  const removeExpense = (id) => {
+    const idx = expenses.findIndex((e) => e.id === id);
+    const removed = expenses[idx];
+    setExpenses((prev) => prev.filter((e) => e.id !== id));
+    setDeleteId(null);
+    if (removed) {
+      logAction && logAction('delete', 'expense', id, removed, null);
+      showUndo('Deleted expense', () => {
+        setExpenses((prev) => {
+          if (prev.some((e) => e.id === removed.id)) return prev;
+          const copy = [...prev];
+          copy.splice(Math.min(idx, copy.length), 0, removed);
+          return copy;
+        });
+      });
+    }
+  };
+
+  const exportCsv = () => {
+    const header = ['Date', 'Category', 'Company', 'Amount (₹)', 'Note'];
+    const rows = visibleList.map((e) => [e.date, e.category, e.company || '', e.amount, e.note || '']);
+    downloadCsv(`expenses_${toISO(today())}.csv`, [header, ...rows]);
+  };
+
+  return (
+    <div>
+      <SectionHeader
+        title="Expenses"
+        subtitle="Rent, vehicle maintenance, and other running costs — folded into profit and loss automatically"
+        right={
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="edm-btn edm-btn-ghost" onClick={exportCsv}><Download size={15} /> Export CSV</button>
+            <button className="edm-btn edm-btn-amber" onClick={() => setModal({ mode: 'add' })}><Plus size={15} /> Add expense</button>
+          </div>
+        }
+      />
+
+      <FilterBar preset={preset} setPreset={setPreset} customStart={customStart} customEnd={customEnd} setCustomStart={setCustomStart} setCustomEnd={setCustomEnd}
+        employeeFilter="All" setEmployeeFilter={() => {}} employees={[]} showEmployee={false}
+        companyFilter={companyFilter} setCompanyFilter={setCompanyFilter} />
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="edm-label" style={{ marginBottom: 0 }}>Category</span>
+        {['All', ...categories].map((c) => (
+          <button key={c} className={`edm-btn ${categoryFilter === c ? 'edm-btn-primary' : 'edm-btn-ghost'}`} onClick={() => setCategoryFilter(c)}>{c}</button>
+        ))}
+      </div>
+
+      <div className="edm-card" style={{ padding: 14, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span className="edm-label" style={{ marginBottom: 0 }}>{visibleList.length} expense{visibleList.length === 1 ? '' : 's'}</span>
+        <span className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{inr(total)}</span>
+      </div>
+
+      <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
+        <table className="edm-table">
+          <SortFilterHead columns={columns} controls={tableControls} extraEnd={<th></th>} />
+          <tbody>
+            {visibleList.map((e) => (
+              <tr key={e.id}>
+                <td>{e.date}</td>
+                <td>{e.category}</td>
+                <td>{e.company || <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+                <td className="font-mono" style={{ fontWeight: 600 }}>{inr(e.amount)}</td>
+                <td style={{ color: 'var(--text-muted)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{e.note || '—'}</td>
+                <td>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button className="edm-btn edm-btn-ghost" style={{ padding: 6 }} onClick={() => setModal({ mode: 'edit', expense: e })}><Pencil size={13} /></button>
+                    <button className="edm-btn edm-btn-danger-ghost" style={{ padding: 6 }} onClick={() => setDeleteId(e.id)}><Trash2 size={13} /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {visibleList.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No expenses recorded for this range.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {(modal?.mode === 'add' || modal?.mode === 'edit') && (
+        <ExpenseForm
+          initial={modal.mode === 'edit' ? modal.expense : emptyExpenseForm(categories)}
+          categories={categories}
+          onSave={modal.mode === 'edit' ? updateExpense : addExpense}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {deleteId && (
+        <Modal title="Delete expense" onClose={() => setDeleteId(null)} width={360}>
+          <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>This removes the expense record. You'll have a few seconds to undo right after.</p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => removeExpense(deleteId)}>Delete</button>
+            <button className="edm-btn edm-btn-ghost" onClick={() => setDeleteId(null)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+      <UndoToast toast={toast} onDismiss={dismiss} />
+    </div>
+  );
+}
+
+/* ---------------------------------- Reconciliation page (Phase G) ---------------------------------- */
+
+function ReconciliationPage({ entries, companies, reconciliations, setReconciliations, logAction }) {
+  const [company, setCompany] = useState(companies[0] || '');
+  const [preset, setPreset] = useState('thisMonth');
+  const [customStart, setCustomStart] = useState(toISO(today()));
+  const [customEnd, setCustomEnd] = useState(toISO(today()));
+  const [companyReportedCount, setCompanyReportedCount] = useState('');
+  const [reason, setReason] = useState('');
+  const [deleteId, setDeleteId] = useState(null);
+  const { toast, showUndo, dismiss } = useUndoToast();
+
+  const [start, end] = getRange(preset, customStart, customEnd);
+  const periodStart = toISO(start), periodEnd = toISO(end);
+
+  const systemCount = entries
+    .filter((en) => en.company === company && inRange(en.date, start, end))
+    .reduce((s, en) => s + en.delivered, 0);
+
+  const existing = reconciliations.find((r) => r.company === company && r.periodStart === periodStart && r.periodEnd === periodEnd);
+
+  useEffect(() => {
+    setCompanyReportedCount(existing ? String(existing.companyReportedCount) : '');
+    setReason(existing ? existing.reason || '' : '');
+    // Only re-sync the form when the selected period/company changes, not on every keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [company, periodStart, periodEnd]);
+
+  const reportedNum = Number(companyReportedCount) || 0;
+  const difference = reportedNum - systemCount;
+
+  const saveReconciliation = () => {
+    const record = {
+      id: existing ? existing.id : uid(),
+      company, periodStart, periodEnd,
+      companyReportedCount: reportedNum,
+      systemCount,
+      adjustment: difference,
+      reason,
+    };
+    setReconciliations((prev) => {
+      const idx = prev.findIndex((r) => r.id === record.id);
+      if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
+      return [...prev, record];
+    });
+    logAction && logAction(existing ? 'update' : 'create', 'reconciliation', record.id, existing || null, record);
+  };
+
+  const removeReconciliation = (id) => {
+    const idx = reconciliations.findIndex((r) => r.id === id);
+    const removed = reconciliations[idx];
+    setReconciliations((prev) => prev.filter((r) => r.id !== id));
+    setDeleteId(null);
+    if (removed) {
+      logAction && logAction('delete', 'reconciliation', id, removed, null);
+      showUndo('Deleted reconciliation record', () => {
+        setReconciliations((prev) => (prev.some((r) => r.id === removed.id) ? prev : [...prev, removed]));
+      });
+    }
+  };
+
+  const history = reconciliations.filter((r) => r.company === company).sort((a, b) => b.periodStart.localeCompare(a.periodStart));
+
+  return (
+    <div>
+      <SectionHeader title="Reconciliation" subtitle="Compare the company's own reported delivery count against what's recorded here, for a billing period" />
+
+      <div className="edm-card" style={{ padding: 14, display: 'flex', gap: 14, alignItems: 'flex-end', marginBottom: 16, flexWrap: 'wrap' }}>
+        <div style={{ minWidth: 180 }}>
+          <label className="edm-label">Company</label>
+          <select className="edm-select" value={company} onChange={(e) => setCompany(e.target.value)}>
+            {companies.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ minWidth: 150 }}>
+          <label className="edm-label">Period</label>
+          <select className="edm-select" value={preset} onChange={(e) => setPreset(e.target.value)}>
+            {PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+        {preset === 'custom' && (
+          <>
+            <div><label className="edm-label">From</label><input type="date" className="edm-input" value={customStart} onChange={(e) => setCustomStart(e.target.value)} /></div>
+            <div><label className="edm-label">To</label><input type="date" className="edm-input" value={customEnd} min={customStart} onChange={(e) => setCustomEnd(e.target.value)} /></div>
+          </>
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 14, marginBottom: 20 }}>
+        <MetricCard label="System delivered count" value={systemCount} icon={Package} tone="navy" />
+        <MetricCard label="Company reported count" value={reportedNum} icon={Truck} tone="amber" />
+        <MetricCard label="Difference" value={difference > 0 ? `+${difference}` : difference} tone={difference === 0 ? 'teal' : 'danger'} icon={Scale} />
+      </div>
+
+      <div className="edm-card" style={{ padding: 20, marginBottom: 20 }}>
+        <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 14px' }}>Record this period's reconciliation</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+          <div><label className="edm-label">Company-reported delivered count</label><input type="number" min="0" className="edm-input" value={companyReportedCount} onChange={(e) => setCompanyReportedCount(e.target.value)} placeholder="0" /></div>
+          <div><label className="edm-label">System count (auto)</label><input className="edm-input font-mono" value={systemCount} disabled style={{ background: '#F4F5F7', color: 'var(--text-muted)' }} /></div>
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <label className="edm-label">Reason for difference (optional)</label>
+          <input className="edm-input" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. 3 parcels delivered after cutoff, counted next cycle" />
+        </div>
+        {difference !== 0 && (
+          <div style={{ background: '#FDF1E7', border: '1px solid var(--amber)', borderRadius: 8, padding: '10px 12px', marginBottom: 12, fontSize: 12.5, color: '#7A4A0A', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <AlertTriangle size={14} /> {Math.abs(difference)} {difference > 0 ? 'more' : 'fewer'} delivered by the company's count than recorded here.
+          </div>
+        )}
+        <button className="edm-btn edm-btn-amber" onClick={saveReconciliation}>{existing ? 'Update record' : 'Save reconciliation'}</button>
+      </div>
+
+      <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
+        <table className="edm-table">
+          <thead><tr><th>Period</th><th>System count</th><th>Company count</th><th>Difference</th><th>Reason</th><th></th></tr></thead>
+          <tbody>
+            {history.map((r) => (
+              <tr key={r.id}>
+                <td>{r.periodStart}{r.periodStart !== r.periodEnd ? ` – ${r.periodEnd}` : ''}</td>
+                <td className="font-mono">{r.systemCount}</td>
+                <td className="font-mono">{r.companyReportedCount}</td>
+                <td className="font-mono" style={{ color: r.adjustment === 0 ? 'var(--teal-dark)' : 'var(--danger)', fontWeight: 600 }}>{r.adjustment > 0 ? `+${r.adjustment}` : r.adjustment}</td>
+                <td style={{ color: 'var(--text-muted)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.reason || '—'}</td>
+                <td><button className="edm-btn edm-btn-danger-ghost" style={{ padding: 6 }} onClick={() => setDeleteId(r.id)}><Trash2 size={13} /></button></td>
+              </tr>
+            ))}
+            {history.length === 0 && <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No reconciliation records for {company} yet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
+      {deleteId && (
+        <Modal title="Delete reconciliation record" onClose={() => setDeleteId(null)} width={360}>
+          <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>This removes the saved reconciliation for this period. You'll have a few seconds to undo right after.</p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => removeReconciliation(deleteId)}>Delete</button>
+            <button className="edm-btn edm-btn-ghost" onClick={() => setDeleteId(null)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+      <UndoToast toast={toast} onDismiss={dismiss} />
+    </div>
+  );
+}
+
 /* ---------------------------------- Settings page ---------------------------------- */
 
-function SettingsPage({ rates, setRates, employees = [], entries = [], companies, setCompanies, setEmployees, setEntries, lastExportAt, onDataExported, onDataImported }) {
+// Phase B: "change a rate" is always effective-dated — this modal covers both a salary
+// structure's per-delivery/petrol rate and a company's per-delivery revenue rate, since
+// they share the same "new value, effective from a date" shape.
+function RateChangeModal({ target, form, onClose, onSaveStructure, onSaveRevenue }) {
+  const isStructure = target.type === 'structure';
+  const structure = isStructure ? form.salaryStructures.find((s) => s.id === target.id) : null;
+  const current = isStructure ? findSalaryStructure(form, target.id) : null;
+  const currentRevenueRate = !isStructure ? resolveRevenueRateAt(form, target.company) : null;
+
+  const [perDelivery, setPerDelivery] = useState(isStructure ? current.perDelivery : 0);
+  const [petrol, setPetrol] = useState(isStructure ? current.petrol : 0);
+  const [rate, setRate] = useState(!isStructure ? currentRevenueRate : 0);
+  const [effectiveFrom, setEffectiveFrom] = useState(toISO(today()));
+
+  const save = () => {
+    if (isStructure) onSaveStructure(target.id, { perDelivery, petrol, effectiveFrom });
+    else onSaveRevenue(target.company, { rate, effectiveFrom });
+  };
+
+  return (
+    <Modal title={isStructure ? `Change rate — ${structure.label}` : `Change rate — ${target.company}`} onClose={onClose} width={380}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
+          This sets a new rate effective from the date below — every past payslip and report keeps using whatever rate actually applied on its own date, so nothing already issued changes.
+        </p>
+        {isStructure ? (
+          <>
+            <div><label className="edm-label">Rate per successful delivery (₹)</label><input type="number" className="edm-input" value={perDelivery} onChange={(e) => setPerDelivery(Number(e.target.value))} /></div>
+            <div><label className="edm-label">Petrol / other allowance per working day (₹)</label><input type="number" className="edm-input" value={petrol} onChange={(e) => setPetrol(Number(e.target.value))} /></div>
+          </>
+        ) : (
+          <div><label className="edm-label">₹ per successful delivery</label><input type="number" className="edm-input" value={rate} onChange={(e) => setRate(Number(e.target.value))} /></div>
+        )}
+        <div>
+          <label className="edm-label">Effective from</label>
+          <input type="date" className="edm-input" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} />
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+          <button className="edm-btn edm-btn-amber" style={{ flex: 1, justifyContent: 'center' }} onClick={save}>Save rate</button>
+          <button className="edm-btn edm-btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function SettingsPage({ rates, setRates, employees = [], entries = [], companies, setCompanies, setEmployees, setEntries, payments = [], setPayments, expenses = [], setExpenses, reconciliations = [], setReconciliations, auditLog = [], expenseCategories, setExpenseCategories, lastExportAt, onDataExported, onDataImported, logAction }) {
   const [form, setForm] = useState(rates);
   const [saved, setSaved] = useState(false);
   const [removeId, setRemoveId] = useState(null);
@@ -3172,12 +3900,36 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const [importError, setImportError] = useState('');
   const [importSuccess, setImportSuccess] = useState('');
   const [pendingImport, setPendingImport] = useState(null); // parsed data awaiting confirmation
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [categoryError, setCategoryError] = useState('');
+  const [removeCategory, setRemoveCategory] = useState(null);
   const fileInputRef = useRef(null);
 
-  const save = () => { setRates(form); setSaved(true); setTimeout(() => setSaved(false), 1800); };
+  const save = () => {
+    logAction && logAction('update', 'rates', null, rates, form);
+    setRates(form);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1800);
+  };
+
+  // Phase F: expense categories are managed the same way companies are — a plain
+  // editable list, written directly (not batched into the "Save settings" rates form).
+  const categoryUsageCount = (name) => expenses.filter((e) => e.category === name).length;
+  const addExpenseCategory = () => {
+    const name = newCategoryName.trim();
+    if (!name) { setCategoryError('Enter a category name.'); return; }
+    if ((expenseCategories || []).some((c) => c.toLowerCase() === name.toLowerCase())) { setCategoryError('That category already exists.'); return; }
+    setExpenseCategories((prev) => [...prev, name]);
+    setNewCategoryName('');
+    setCategoryError('');
+  };
+  const confirmRemoveCategory = (name) => {
+    setExpenseCategories((prev) => prev.filter((c) => c !== name));
+    setRemoveCategory(null);
+  };
 
   const exportAllData = () => {
-    const payload = buildBackupPayload({ companies, employees, entries, rates });
+    const payload = buildBackupPayload({ companies, employees, entries, rates, payments, expenses, reconciliations, auditLog });
     downloadJson(`deliveryops_backup_${toISO(today())}.json`, payload);
     onDataExported && onDataExported();
   };
@@ -3210,20 +3962,49 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
     setEntries(pendingImport.entries);
     setRates(pendingImport.rates);
     setForm(pendingImport.rates);
+    setPayments && setPayments(pendingImport.payments || []);
+    setExpenses && setExpenses(pendingImport.expenses || []);
+    setReconciliations && setReconciliations(pendingImport.reconciliations || []);
     setPendingImport(null);
     setImportSuccess(`Import complete — restored ${pendingImport.employees.length} employees and ${pendingImport.entries.length} entries.`);
+    logAction && logAction('import', 'backup', null, null, { employees: pendingImport.employees.length, entries: pendingImport.entries.length });
     onDataImported && onDataImported();
   };
 
-  const updateStructure = (id, patch) => {
-    setForm((f) => ({ ...f, salaryStructures: f.salaryStructures.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
+  // Rate/label edits: the label is cosmetic and can be changed in place, but the actual
+  // ₹ rates are effective-dated (Phase B) — see changeStructureRate/changeRevenueRate and
+  // the "Change rate" modal below, rather than overwriting a number in place.
+  const updateStructureLabel = (id, label) => {
+    setForm((f) => ({ ...f, salaryStructures: f.salaryStructures.map((s) => (s.id === id ? { ...s, label } : s)) }));
+  };
+
+  const [rateChangeTarget, setRateChangeTarget] = useState(null); // { type: 'structure', id } | { type: 'revenue', company }
+
+  const changeStructureRate = (id, { perDelivery, petrol, effectiveFrom }) => {
+    setForm((f) => ({
+      ...f,
+      salaryStructures: f.salaryStructures.map((s) => (
+        s.id === id
+          ? { id: s.id, label: s.label, history: upsertHistoryEntry(structureHistory(s), { perDelivery: Number(perDelivery) || 0, petrol: Number(petrol) || 0, effectiveFrom }) }
+          : s
+      )),
+    }));
+    setRateChangeTarget(null);
+  };
+
+  const changeRevenueRate = (company, { rate, effectiveFrom }) => {
+    setForm((f) => ({
+      ...f,
+      revenue: { ...f.revenue, [company]: upsertHistoryEntry(revenueHistory(f.revenue[company]), { rate: Number(rate) || 0, effectiveFrom }) },
+    }));
+    setRateChangeTarget(null);
   };
 
   const addStructure = () => {
     const n = form.salaryStructures.length + 1;
     setForm((f) => ({
       ...f,
-      salaryStructures: [...f.salaryStructures, { id: `structure_${uid()}`, label: `Method ${n}`, perDelivery: 0, petrol: 0 }],
+      salaryStructures: [...f.salaryStructures, { id: `structure_${uid()}`, label: `Method ${n}`, history: [{ perDelivery: 0, petrol: 0, effectiveFrom: toISO(today()) }] }],
     }));
   };
 
@@ -3240,7 +4021,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
     if (!name) { setCompanyError('Enter a company name.'); return; }
     if (companies.some((c) => c.toLowerCase() === name.toLowerCase())) { setCompanyError('That company already exists.'); return; }
     setCompanies((prev) => [...prev, name]);
-    setForm((f) => ({ ...f, revenue: { ...f.revenue, [name]: Number(newCompanyRate) || 0 } }));
+    setForm((f) => ({ ...f, revenue: { ...f.revenue, [name]: [{ rate: Number(newCompanyRate) || 0, effectiveFrom: toISO(today()) }] } }));
     setNewCompanyName('');
     setNewCompanyRate(20);
     setCompanyError('');
@@ -3284,6 +4065,8 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16, marginBottom: 16 }}>
         {form.salaryStructures.map((s) => {
           const inUse = usageCount(s.id);
+          const history = structureHistory(s);
+          const current = findSalaryStructure(form, s.id);
           return (
             <div key={s.id} className="edm-card" style={{ padding: 20, position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, gap: 8 }}>
@@ -3291,7 +4074,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
                   className="edm-input font-display"
                   style={{ fontWeight: 700, fontSize: 15, border: 'none', padding: '2px 0', background: 'transparent' }}
                   value={s.label}
-                  onChange={(e) => updateStructure(s.id, { label: e.target.value })}
+                  onChange={(e) => updateStructureLabel(s.id, e.target.value)}
                 />
                 <button
                   className="edm-btn edm-btn-danger-ghost"
@@ -3303,16 +4086,26 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
                   <Trash2 size={13} />
                 </button>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div>
-                  <label className="edm-label">Rate per successful delivery (₹)</label>
-                  <input type="number" className="edm-input" value={s.perDelivery} onChange={(e) => updateStructure(s.id, { perDelivery: Number(e.target.value) })} />
-                </div>
-                <div>
-                  <label className="edm-label">Petrol / other allowance per working day (₹)</label>
-                  <input type="number" className="edm-input" value={s.petrol} onChange={(e) => updateStructure(s.id, { petrol: Number(e.target.value) })} />
-                </div>
+              <div style={{ background: '#F7F8FA', borderRadius: 8, padding: 12, marginBottom: 10 }}>
+                <div className="edm-label">Current rate</div>
+                <div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>₹{current.perDelivery}/delivery{current.petrol ? ` + ₹${current.petrol}/day petrol` : ''}</div>
               </div>
+              <button className="edm-btn edm-btn-ghost" style={{ width: '100%', justifyContent: 'center', marginBottom: 10 }} onClick={() => setRateChangeTarget({ type: 'structure', id: s.id })}>
+                Change rate…
+              </button>
+              {history.length > 1 && (
+                <details style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  <summary style={{ cursor: 'pointer', marginBottom: 6 }}>Rate history ({history.length})</summary>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {history.slice().sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)).map((h) => (
+                      <div key={h.effectiveFrom} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span>From {h.effectiveFrom}</span>
+                        <span className="font-mono">₹{h.perDelivery}/delivery{h.petrol ? ` +₹${h.petrol}/day` : ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
               {inUse > 0 && (
                 <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 10, marginBottom: 0 }}>
                   Used by {inUse} employee{inUse === 1 ? '' : 's'}
@@ -3328,6 +4121,8 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 18 }}>
           {companies.map((c) => {
             const inUse = companyUsageCount(c);
+            const history = revenueHistory(form.revenue[c]);
+            const currentRate = resolveRevenueRateAt(form, c);
             return (
               <div key={c} className="edm-card" style={{ padding: 14 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
@@ -3342,8 +4137,26 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
                     <Trash2 size={12} />
                   </button>
                 </div>
-                <label className="edm-label">₹ per successful delivery</label>
-                <input type="number" className="edm-input" value={form.revenue[c] ?? 0} onChange={(e) => setForm((f) => ({ ...f, revenue: { ...f.revenue, [c]: Number(e.target.value) } }))} />
+                <div style={{ background: '#F7F8FA', borderRadius: 8, padding: '8px 10px', marginBottom: 8 }}>
+                  <div className="edm-label">Current rate</div>
+                  <div className="font-mono" style={{ fontWeight: 700 }}>₹{currentRate}/delivery</div>
+                </div>
+                <button className="edm-btn edm-btn-ghost" style={{ width: '100%', justifyContent: 'center' }} onClick={() => setRateChangeTarget({ type: 'revenue', company: c })}>
+                  Change rate…
+                </button>
+                {history.length > 1 && (
+                  <details style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
+                    <summary style={{ cursor: 'pointer', marginBottom: 6 }}>Rate history ({history.length})</summary>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {history.slice().sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom)).map((h) => (
+                        <div key={h.effectiveFrom} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                          <span>From {h.effectiveFrom}</span>
+                          <span className="font-mono">₹{h.rate}/delivery</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
                 {inUse > 0 && (
                   <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8, marginBottom: 0 }}>
                     {inUse} employee{inUse === 1 ? '' : 's'} assigned
@@ -3372,11 +4185,91 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
         </div>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div className="edm-card" style={{ padding: 20, marginBottom: 16 }}>
+        <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 14px' }}>Expense categories</h3>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+          {(expenseCategories || []).map((c) => {
+            const inUse = categoryUsageCount(c);
+            return (
+              <span key={c} className="edm-badge edm-badge-inactive" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 6px 5px 10px' }}>
+                {c}{inUse > 0 ? ` (${inUse})` : ''}
+                <button
+                  style={{ background: 'none', border: 'none', cursor: (expenseCategories || []).length <= 1 ? 'not-allowed' : 'pointer', padding: 2, opacity: (expenseCategories || []).length <= 1 ? 0.4 : 1, display: 'flex' }}
+                  disabled={(expenseCategories || []).length <= 1}
+                  title={(expenseCategories || []).length <= 1 ? 'At least one category is required' : 'Remove this category'}
+                  onClick={() => setRemoveCategory(c)}
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            );
+          })}
+        </div>
+        <label className="edm-label">Add a new category</label>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <input className="edm-input" placeholder="Category name" value={newCategoryName} onChange={(e) => { setNewCategoryName(e.target.value); setCategoryError(''); }} />
+          </div>
+          <button className="edm-btn edm-btn-amber" onClick={addExpenseCategory}><Plus size={15} /> Add category</button>
+        </div>
+        {categoryError && <p style={{ fontSize: 12, color: 'var(--danger)', marginTop: 8, marginBottom: 0 }}>{categoryError}</p>}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
         <button className="edm-btn edm-btn-amber" onClick={save}>Save settings</button>
         {saved && <span style={{ fontSize: 13, color: 'var(--teal-dark)', fontWeight: 600 }}>Settings saved</span>}
       </div>
 
+      <div className="edm-card" style={{ padding: 20 }}>
+        <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 6px' }}>Audit log</h3>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 14px' }}>
+          A read-only record of key changes — employee edits, rate changes, backup imports, and salary payouts marked paid/unpaid — useful when more than one person shares this login.
+        </p>
+        <div className="edm-scroll" style={{ maxHeight: 320, overflowY: 'auto' }}>
+          <table className="edm-table">
+            <thead><tr><th>When</th><th>By</th><th>Action</th><th>Entity</th><th>Details</th></tr></thead>
+            <tbody>
+              {auditLog.slice().sort((a, b) => b.at.localeCompare(a.at)).slice(0, 200).map((log) => (
+                <tr key={log.id}>
+                  <td className="font-mono" style={{ whiteSpace: 'nowrap' }}>{new Date(log.at).toLocaleString('en-IN')}</td>
+                  <td>{log.byUsername || '—'}</td>
+                  <td>{log.action}</td>
+                  <td>{log.entity}{log.entityId ? ` (${log.entityId})` : ''}</td>
+                  <td style={{ color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {log.after ? JSON.stringify(log.after).slice(0, 120) : (log.before ? `removed: ${JSON.stringify(log.before).slice(0, 110)}` : '—')}
+                  </td>
+                </tr>
+              ))}
+              {auditLog.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 20 }}>Nothing logged yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        {auditLog.length > 200 && <p style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 8, marginBottom: 0 }}>Showing the 200 most recent entries of {auditLog.length}.</p>}
+      </div>
+
+      {removeCategory && (
+        <Modal title="Remove expense category" onClose={() => setRemoveCategory(null)} width={380}>
+          <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>
+            {categoryUsageCount(removeCategory) > 0
+              ? `${categoryUsageCount(removeCategory)} expense${categoryUsageCount(removeCategory) === 1 ? '' : 's'} currently use "${removeCategory}". They keep the category name on file, but it won't be offered for new expenses. This can't be undone.`
+              : `This removes "${removeCategory}" from the category list. This can't be undone.`}
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => confirmRemoveCategory(removeCategory)}>Remove</button>
+            <button className="edm-btn edm-btn-ghost" onClick={() => setRemoveCategory(null)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+
+      {rateChangeTarget && (
+        <RateChangeModal
+          target={rateChangeTarget}
+          form={form}
+          onClose={() => setRateChangeTarget(null)}
+          onSaveStructure={changeStructureRate}
+          onSaveRevenue={changeRevenueRate}
+        />
+      )}
       {removeId && (
         <Modal title="Remove salary structure" onClose={() => setRemoveId(null)} width={380}>
           <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>
@@ -3478,6 +4371,11 @@ firebase.initializeApp(firebaseConfig);
 const fbAuth = firebase.auth();
 const db = firebase.firestore();
 db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
+// Phase D: delivery-proof photo uploads. Storage needs to be enabled for this Firebase
+// project in the console before uploads will actually work — guarded so the rest of the
+// app (which doesn't need Storage) still runs fine on a project where it isn't set up yet.
+let fbStorage = null;
+try { fbStorage = firebase.storage(); } catch (e) { fbStorage = null; }
 
 // Firebase Auth needs an email address. Usernames typed at login are
 // mapped to a fake-but-valid email under this fixed domain, so users
@@ -3577,6 +4475,187 @@ function LoginPage({ onLogin }) {
   );
 }
 
+/* ================================================================
+   Phase A — Employee self-service submission
+   ----------------------------------------------------------------
+   A minimal, mobile-first view for riders to submit their own day's
+   delivery counts (+ optional proof photo, Phase D) instead of
+   office staff typing every number into Quick Entry. Reached at the
+   same URL as the office dashboard — DashboardApp renders this
+   instead of the full nav+pages shell whenever the signed-in
+   account's UID matches an employee record's `authUid` field (set
+   by office staff in the employee's Edit form after creating that
+   account in the Firebase console — see EmployeeForm).
+   ================================================================ */
+
+function SubmissionStatusBadge({ status }) {
+  if (status === 'approved') return <span className="edm-badge edm-badge-active"><CheckCircle2 size={11} /> Approved</span>;
+  if (status === 'rejected') return <span className="edm-badge" style={{ background: '#FBEAEA', color: 'var(--danger)' }}><XCircle size={11} /> Rejected</span>;
+  return <span className="edm-badge" style={{ background: '#FDF1E7', color: '#7A4A0A' }}><History size={11} /> Pending review</span>;
+}
+
+function EmployeeSelfServicePage({ employee, entries, setEntries, onLogout }) {
+  const [assignedVal, setAssignedVal] = useState('');
+  const [deliveredVal, setDeliveredVal] = useState('');
+  const [remarks, setRemarks] = useState('');
+  const [photoFile, setPhotoFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [submitted, setSubmitted] = useState(false);
+
+  const assignedNum = Number(assignedVal) || 0;
+  const deliveredNum = Math.min(assignedNum, Number(deliveredVal) || 0);
+
+  const submit = async () => {
+    if (assignedVal === '') return;
+    setUploading(true);
+    setUploadError('');
+    const entryId = uid();
+    let proofUrl = '';
+    if (photoFile) {
+      if (!fbStorage) {
+        setUploadError('Photo not uploaded — ask the office to enable Storage for this project. Your delivery numbers were still submitted.');
+      } else {
+        try {
+          const ref = fbStorage.ref().child(`deliveryProofs/${employee.id}/${entryId}/${photoFile.name}`);
+          await ref.put(photoFile);
+          proofUrl = await ref.getDownloadURL();
+        } catch (e) {
+          setUploadError('Could not upload the photo — your delivery numbers were still submitted.');
+        }
+      }
+    }
+    const record = {
+      id: entryId,
+      date: toISO(today()),
+      company: employee.company,
+      employeeId: employee.id,
+      assigned: assignedNum,
+      delivered: deliveredNum,
+      failed: Math.max(0, assignedNum - deliveredNum),
+      remarks,
+      status: 'submitted',
+      proofUrl,
+    };
+    setEntries((prev) => [...prev, record]);
+    setUploading(false);
+    setAssignedVal(''); setDeliveredVal(''); setRemarks(''); setPhotoFile(null);
+    setSubmitted(true);
+    setTimeout(() => setSubmitted(false), 3000);
+  };
+
+  // Resubmitting a rejected entry starts a fresh submission with the same numbers
+  // pre-filled, rather than editing the rejected row — keeps the review history intact.
+  const prefillFromRejected = (en) => {
+    setAssignedVal(String(en.assigned));
+    setDeliveredVal(String(en.delivered));
+    setRemarks(en.remarks || '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const mySubmissions = entries
+    .filter((en) => en.employeeId === employee.id)
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 20);
+
+  return (
+    <div className="edm-root" style={{ minHeight: '100vh', background: 'var(--bg)' }}>
+      <GlobalStyle />
+      <div style={{ background: 'var(--navy)', color: '#fff', padding: '14px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <img src={LOGO_DATA_URI} alt="" style={{ width: 28, height: 28, objectFit: 'contain' }} />
+          <div>
+            <div className="font-display" style={{ fontWeight: 700, fontSize: 14 }}>{employee.name}</div>
+            <div style={{ fontSize: 11, color: '#B7C0D8' }}>{employee.company}{employee.hubLocation ? ` · ${employee.hubLocation}` : ''}</div>
+          </div>
+        </div>
+        <button className="edm-btn edm-btn-ghost" style={{ background: 'transparent', borderColor: '#3A4568', color: '#fff', padding: '6px 10px' }} onClick={onLogout}>
+          <LogOut size={14} /> Sign out
+        </button>
+      </div>
+
+      <div style={{ maxWidth: 480, margin: '0 auto', padding: 16 }}>
+        <div className="edm-card" style={{ padding: 18, marginBottom: 16 }}>
+          <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 4px' }}>Today's deliveries</h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 16px' }}>{fromISO(toISO(today())).toLocaleDateString('en-IN', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' })}</p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <div>
+              <label className="edm-label">Total assigned</label>
+              <input type="number" min="0" inputMode="numeric" className="edm-input" style={{ fontSize: 16, padding: '10px 12px' }} value={assignedVal} onChange={(e) => setAssignedVal(e.target.value)} placeholder="0" />
+            </div>
+            <div>
+              <label className="edm-label">Successfully delivered</label>
+              <input type="number" min="0" inputMode="numeric" className="edm-input" style={{ fontSize: 16, padding: '10px 12px' }} value={deliveredVal} onChange={(e) => setDeliveredVal(e.target.value)} placeholder="0" />
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#F7F8FA', borderRadius: 8, padding: '10px 12px', marginBottom: 12 }}>
+            <span style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>Failed / returned</span>
+            <span className="font-mono" style={{ fontWeight: 700, color: 'var(--danger)' }}>{Math.max(0, assignedNum - deliveredNum)}</span>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label className="edm-label">Remarks (optional)</label>
+            <input className="edm-input" value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Any notes for the office" />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label className="edm-label">Proof photo (optional)</label>
+            <input
+              type="file" accept="image/*" capture="environment"
+              onChange={(e) => setPhotoFile(e.target.files && e.target.files[0] ? e.target.files[0] : null)}
+              style={{ fontSize: 12.5 }}
+            />
+            {photoFile && <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '6px 0 0' }}>{photoFile.name}</p>}
+          </div>
+
+          {uploadError && <p style={{ fontSize: 12, color: 'var(--danger)', margin: '0 0 10px' }}>{uploadError}</p>}
+          {submitted && <p style={{ fontSize: 12.5, color: 'var(--teal-dark)', fontWeight: 600, margin: '0 0 10px' }}>Submitted — the office will review it shortly.</p>}
+
+          <button
+            className="edm-btn edm-btn-amber"
+            style={{ width: '100%', justifyContent: 'center', padding: '11px 14px', opacity: assignedVal === '' || uploading ? 0.6 : 1 }}
+            disabled={assignedVal === '' || uploading}
+            onClick={submit}
+          >
+            {uploading ? 'Submitting…' : 'Submit for review'}
+          </button>
+        </div>
+
+        <div className="edm-card" style={{ padding: 18 }}>
+          <h3 className="font-display" style={{ fontSize: 14, fontWeight: 700, margin: '0 0 12px' }}>My recent submissions</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {mySubmissions.map((en) => (
+              <div key={en.id} style={{ borderBottom: '1px solid #EEF0F2', paddingBottom: 10 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{en.date}</span>
+                  <SubmissionStatusBadge status={en.status || 'approved'} />
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>
+                  {en.delivered} delivered of {en.assigned} assigned
+                </div>
+                {en.status === 'rejected' && (
+                  <div style={{ marginTop: 6, background: '#FBEAEA', borderRadius: 6, padding: '6px 8px', fontSize: 11.5, color: '#8A2E2E' }}>
+                    {en.reviewNote || 'Rejected by the office.'}
+                    <button
+                      style={{ display: 'block', marginTop: 4, background: 'none', border: 'none', padding: 0, color: 'var(--navy)', textDecoration: 'underline', cursor: 'pointer', fontSize: 11.5 }}
+                      onClick={() => prefillFromRejected(en)}
+                    >
+                      Resubmit
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+            {mySubmissions.length === 0 && <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>No submissions yet.</p>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [authState, setAuthState] = useState('loading'); // 'loading' | 'signedOut' | 'signedIn'
   const [currentUser, setCurrentUser] = useState(null);
@@ -3585,7 +4664,7 @@ function App() {
     const unsub = fbAuth.onAuthStateChanged((user) => {
       if (user) {
         const username = emailToUsername(user.email);
-        setCurrentUser({ username, name: displayNameFromUsername(username) });
+        setCurrentUser({ username, name: displayNameFromUsername(username), uid: user.uid });
         setAuthState('signedIn');
       } else {
         setCurrentUser(null);
@@ -3616,6 +4695,11 @@ function DashboardApp({ currentUser, onLogout }) {
   const [employees, setEmployees] = useState(() => loadLS('employees', []));
   const [entries, setEntries] = useState(() => loadLS('entries', []));
   const [rates, setRates] = useState(() => loadLS('rates', DEFAULT_RATES));
+  const [payments, setPayments] = useState(() => loadLS('payments', []));
+  const [expenses, setExpenses] = useState(() => loadLS('expenses', []));
+  const [reconciliations, setReconciliations] = useState(() => loadLS('reconciliations', []));
+  const [auditLog, setAuditLog] = useState(() => loadLS('auditLog', []));
+  const [expenseCategories, setExpenseCategories] = useState(() => loadLS('expenseCategories', DEFAULT_EXPENSE_CATEGORIES));
   const [page, setPage] = useState(() => loadLS('page', 'dashboard'));
   const [lastExportAt, setLastExportAt] = useState(() => loadLS('lastExportAt', null));
   const [reminderSnoozedAt, setReminderSnoozedAt] = useState(() => loadLS('reminderSnoozedAt', null));
@@ -3636,12 +4720,17 @@ function DashboardApp({ currentUser, onLogout }) {
           if (Array.isArray(data.employees)) setEmployees(data.employees);
           if (Array.isArray(data.entries)) setEntries(data.entries);
           if (data.rates) setRates(data.rates);
+          if (Array.isArray(data.payments)) setPayments(data.payments);
+          if (Array.isArray(data.expenses)) setExpenses(data.expenses);
+          if (Array.isArray(data.reconciliations)) setReconciliations(data.reconciliations);
+          if (Array.isArray(data.auditLog)) setAuditLog(data.auditLog);
+          if (Array.isArray(data.expenseCategories)) setExpenseCategories(data.expenseCategories);
           hasLoadedRemoteRef.current = true;
           setSyncStatus(snap.metadata.fromCache ? 'offline' : 'synced');
         } else if (!hasLoadedRemoteRef.current) {
           // Nothing in Firestore yet — seed it with whatever's already in this browser.
           hasLoadedRemoteRef.current = true;
-          DATA_DOC.set({ companies, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => setSyncStatus('error'));
+          DATA_DOC.set({ companies, employees, entries, rates, payments, expenses, reconciliations, auditLog, expenseCategories, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => setSyncStatus('error'));
         }
       },
       () => setSyncStatus('error')
@@ -3657,12 +4746,12 @@ function DashboardApp({ currentUser, onLogout }) {
     if (applyingRemoteRef.current) { applyingRemoteRef.current = false; return; }
     setSyncStatus('syncing');
     const t = setTimeout(() => {
-      DATA_DOC.set({ companies, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
+      DATA_DOC.set({ companies, employees, entries, rates, payments, expenses, reconciliations, auditLog, expenseCategories, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
         .then(() => setSyncStatus('synced'))
         .catch(() => setSyncStatus('error'));
     }, 600);
     return () => clearTimeout(t);
-  }, [companies, employees, entries, rates]);
+  }, [companies, employees, entries, rates, payments, expenses, reconciliations, auditLog, expenseCategories]);
 
   // Keep a local cache too, so the dashboard opens instantly and still works
   // briefly offline (Firestore's own offline cache also helps with this).
@@ -3670,6 +4759,11 @@ function DashboardApp({ currentUser, onLogout }) {
   useEffect(() => { saveLS('employees', employees); }, [employees]);
   useEffect(() => { saveLS('entries', entries); }, [entries]);
   useEffect(() => { saveLS('rates', rates); }, [rates]);
+  useEffect(() => { saveLS('payments', payments); }, [payments]);
+  useEffect(() => { saveLS('expenses', expenses); }, [expenses]);
+  useEffect(() => { saveLS('reconciliations', reconciliations); }, [reconciliations]);
+  useEffect(() => { saveLS('auditLog', auditLog); }, [auditLog]);
+  useEffect(() => { saveLS('expenseCategories', expenseCategories); }, [expenseCategories]);
   useEffect(() => { saveLS('page', page); }, [page]);
   useEffect(() => { saveLS('lastExportAt', lastExportAt); }, [lastExportAt]);
   useEffect(() => { saveLS('reminderSnoozedAt', reminderSnoozedAt); }, [reminderSnoozedAt]);
@@ -3677,12 +4771,35 @@ function DashboardApp({ currentUser, onLogout }) {
   const daysSince = (iso) => (iso ? (Date.now() - new Date(iso).getTime()) / 86400000 : Infinity);
   const showBackupReminder = employees.length > 0 && daysSince(lastExportAt) >= 7 && daysSince(reminderSnoozedAt) >= 3;
   const exportFromReminder = () => {
-    const payload = buildBackupPayload({ companies, employees, entries, rates });
+    const payload = buildBackupPayload({ companies, employees, entries, rates, payments, expenses, reconciliations, auditLog });
     downloadJson(`deliveryops_backup_${toISO(today())}.json`, payload);
     setLastExportAt(new Date().toISOString());
   };
 
+  // Phase H: a lightweight audit trail. Called alongside the existing
+  // add/edit/delete mutations at a handful of key points (employees, rates,
+  // backup import, marking salary paid, approving/rejecting entries) —
+  // there's no separate audit UI beyond the read-only table in Settings.
+  const logAction = (action, entity, entityId, before, after) => {
+    setAuditLog((prev) => [...prev, {
+      id: uid(),
+      at: new Date().toISOString(),
+      byUid: (fbAuth.currentUser && fbAuth.currentUser.uid) || null,
+      byUsername: currentUser ? currentUser.username : null,
+      action, entity, entityId,
+      before: before === undefined ? null : before,
+      after: after === undefined ? null : after,
+    }]);
+  };
+
   const empById = useMemo(() => Object.fromEntries(employees.map((e) => [e.id, e])), [employees]);
+  // Phase A: if this signed-in account is linked to an employee record (via authUid, set
+  // in that employee's Edit form), they get the simple self-service submission view
+  // instead of the full office dashboard — same URL, same login, routed by role.
+  const myEmployeeRecord = useMemo(
+    () => (currentUser?.uid ? employees.find((e) => e.authUid && e.authUid === currentUser.uid) : null),
+    [employees, currentUser]
+  );
   const nav = useMemo(() => buildNav(companies), [companies]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const currentNavLabel = useMemo(() => {
@@ -3693,29 +4810,37 @@ function DashboardApp({ currentUser, onLogout }) {
   const renderPage = () => {
     if (page.startsWith('revenue:')) {
       const company = page.slice('revenue:'.length);
-      if (!companies.includes(company)) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
-      return <RevenuePage company={company} employees={employees} entries={entries} empById={empById} rates={rates} />;
+      if (!companies.includes(company)) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      return <RevenuePage company={company} employees={employees} entries={entries} empById={empById} rates={rates} reconciliations={reconciliations} />;
     }
     switch (page) {
-      case 'dashboard': return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'employees': return <EmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} entries={entries} rates={rates} />;
-      case 'inactiveEmployees': return <InactiveEmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} rates={rates} />;
-      case 'dailyEntry': return <DailyEntryPage employees={employees} entries={entries} setEntries={setEntries} empById={empById} rates={rates} />;
-      case 'salary': return <SalaryPage employees={employees} entries={entries} rates={rates} />;
-      case 'reportDaily': return <ReportPage level="daily" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'reportWeekly': return <ReportPage level="weekly" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'reportMonthly': return <ReportPage level="monthly" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'reportYearly': return <ReportPage level="yearly" employees={employees} entries={entries} empById={empById} rates={rates} />;
-      case 'pnl': return <PnLPage employees={employees} entries={entries} empById={empById} rates={rates} />;
+      case 'dashboard': return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      case 'employees': return <EmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} entries={entries} rates={rates} logAction={logAction} />;
+      case 'inactiveEmployees': return <InactiveEmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} rates={rates} logAction={logAction} />;
+      case 'dailyEntry': return <DailyEntryPage employees={employees} entries={entries} setEntries={setEntries} empById={empById} rates={rates} currentUser={currentUser} logAction={logAction} />;
+      case 'salary': return <SalaryPage employees={employees} entries={entries} rates={rates} payments={payments} setPayments={setPayments} currentUser={currentUser} logAction={logAction} />;
+      case 'expenses': return <ExpensesPage expenses={expenses} setExpenses={setExpenses} categories={expenseCategories} logAction={logAction} />;
+      case 'reportDaily': return <ReportPage level="daily" employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      case 'reportWeekly': return <ReportPage level="weekly" employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      case 'reportMonthly': return <ReportPage level="monthly" employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      case 'reportYearly': return <ReportPage level="yearly" employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      case 'pnl': return <PnLPage employees={employees} entries={entries} empById={empById} rates={rates} expenses={expenses} />;
+      case 'reconciliation': return <ReconciliationPage entries={entries} companies={companies} reconciliations={reconciliations} setReconciliations={setReconciliations} logAction={logAction} />;
       case 'settings': return (
         <SettingsPage
           rates={rates} setRates={setRates}
           employees={employees} setEmployees={setEmployees}
           entries={entries} setEntries={setEntries}
           companies={companies} setCompanies={setCompanies}
+          payments={payments} setPayments={setPayments}
+          expenses={expenses} setExpenses={setExpenses}
+          reconciliations={reconciliations} setReconciliations={setReconciliations}
+          auditLog={auditLog}
+          expenseCategories={expenseCategories} setExpenseCategories={setExpenseCategories}
           lastExportAt={lastExportAt}
           onDataExported={() => setLastExportAt(new Date().toISOString())}
           onDataImported={() => setPage('dashboard')}
+          logAction={logAction}
         />
       );
       default: return null;
@@ -3723,6 +4848,10 @@ function DashboardApp({ currentUser, onLogout }) {
   };
 
   const goTo = (id) => { setPage(id); setMobileNavOpen(false); };
+
+  if (myEmployeeRecord) {
+    return <EmployeeSelfServicePage employee={myEmployeeRecord} entries={entries} setEntries={setEntries} onLogout={onLogout} />;
+  }
 
   return (
     <CompaniesContext.Provider value={companies}>
