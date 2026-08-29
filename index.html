@@ -1285,7 +1285,7 @@ function DashboardPage({ employees, entries, empById, rates }) {
 /* ---------------------------------- Employee Management page ---------------------------------- */
 
 function emptyEmployeeForm(salaryStructures, companies) {
-  return { id: '', name: '', mobile: '', address: '', hubLocation: '', joiningDate: toISO(today()), company: companies?.[0] || '', salaryMethod: salaryStructures?.[0]?.id || '', status: 'Active', relievingDate: '', relievingReason: '', bankAccountName: '', bankAccountNumber: '', bankIfsc: '', upiId: '' };
+  return { id: '', name: '', simName: '', mobile: '', address: '', hubLocation: '', joiningDate: toISO(today()), company: companies?.[0] || '', salaryMethod: salaryStructures?.[0]?.id || '', status: 'Active', relievingDate: '', relievingReason: '', bankAccountName: '', bankAccountNumber: '', bankIfsc: '', upiId: '' };
 }
 
 function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
@@ -1308,7 +1308,10 @@ function EmployeeForm({ initial, salaryStructures, onSave, onClose }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       {isEdit && <div><label className="edm-label">Employee ID</label><input className="edm-input" value={form.id} disabled style={{ background: '#F4F5F7', color: 'var(--text-muted)' }} /></div>}
-      <div><label className="edm-label">Employee name</label><input className="edm-input" value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="Full name" /></div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div><label className="edm-label">Employee name</label><input className="edm-input" value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="Full name" /></div>
+        <div><label className="edm-label">SIM name</label><input className="edm-input" value={form.simName || ''} onChange={(e) => set('simName', e.target.value)} placeholder="Name on the SIM card" /></div>
+      </div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <div>
           <label className="edm-label">Mobile number</label>
@@ -1530,6 +1533,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const columns = [
     { key: 'id', label: 'ID', getValue: (e) => e.id, filterType: 'text' },
     { key: 'name', label: 'Name', getValue: (e) => e.name, filterType: 'text' },
+    { key: 'simName', label: 'SIM name', getValue: (e) => e.simName || '', filterType: 'text' },
     { key: 'mobile', label: 'Mobile', getValue: (e) => e.mobile, filterType: 'text' },
     { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'select', filterOptions: COMPANIES },
     { key: 'hubLocation', label: 'Hub location', getValue: (e) => e.hubLocation || '', filterType: 'select', filterOptions: hubLocationOptions },
@@ -1542,11 +1546,11 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
   const visibleList = tableControls.apply(list, columns);
 
   const exportEmployeesCsv = () => {
-    const header = ['ID', 'Name', 'Mobile', 'Address', 'Company', 'Hub location', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
+    const header = ['ID', 'Name', 'SIM name', 'Mobile', 'Address', 'Company', 'Hub location', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
     const rows = visibleList.map((e) => {
       const s = salaryStructures.find((x) => x.id === e.salaryMethod);
       return [
-        e.id, e.name, e.mobile, e.address, e.company, e.hubLocation || '',
+        e.id, e.name, e.simName || '', e.mobile, e.address, e.company, e.hubLocation || '',
         s ? s.label : '—', s ? s.perDelivery : '', s ? s.petrol : '',
         e.joiningDate, e.status, e.relievingDate || '', e.relievingReason || '', deliveredThisMonth(e.id),
         e.upiId || '', e.bankAccountName || '', e.bankAccountNumber || '', e.bankIfsc || '',
@@ -1618,6 +1622,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
                 <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{e.id}</td>
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
+                <td style={{ color: e.simName ? 'var(--text)' : 'var(--text-muted)' }}>{e.simName || '—'}</td>
                 <td className="font-mono">{e.mobile}</td>
                 <td>{e.company}</td>
                 <td style={{ color: e.hubLocation ? 'var(--text)' : 'var(--text-muted)' }}>{e.hubLocation || '—'}</td>
@@ -1634,7 +1639,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 </td>
               </tr>
             ))}
-            {visibleList.length === 0 && <tr><td colSpan={12} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
+            {visibleList.length === 0 && <tr><td colSpan={13} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
           </tbody>
         </table>
       </div>
