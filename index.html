@@ -1713,11 +1713,6 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
               <div>
                 <div className="font-display" style={{ fontSize: 16, fontWeight: 700 }}>{COMPANY_NAME}</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Daily delivery report — {dateLabel}{company !== 'All' ? ` · ${company}` : ''}</div>
-                {hasSelection && (
-                  <div style={{ fontSize: 11, color: 'var(--amber-dark)', fontWeight: 600, marginTop: 2 }}>
-                    Selected employees only ({selectedIds.size} of {dayEntries.length})
-                  </div>
-                )}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5 }}>
@@ -1734,7 +1729,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
               <th className="no-print" style={{ width: 34 }}>
                 <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={dayEntries.length === 0} title="Select all" />
               </th>
-              <th>Employee</th><th>Company</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Success %</th><th>Remarks</th><th className="no-print"></th>
+              <th>Employee</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Success %</th><th>Remarks</th><th className="no-print"></th>
             </tr></thead>
             <tbody>
               {dayEntries.map((en) => {
@@ -1750,7 +1745,6 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                       <input type="checkbox" checked={isSelected} onChange={() => toggleOne(en.id)} />
                     </td>
                     <td style={{ fontWeight: 600 }}>{emp ? emp.name : 'Unknown'}</td>
-                    <td>{en.company}</td>
                     <td className="font-mono">{en.assigned}</td>
                     <td className="font-mono" style={{ color: 'var(--teal-dark)' }}>{en.delivered}</td>
                     <td className="font-mono" style={{ color: 'var(--danger)' }}>{en.failed}</td>
@@ -1765,7 +1759,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                   </tr>
                 );
               })}
-              {dayEntries.length === 0 && <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No entries recorded for this date yet.</td></tr>}
+              {dayEntries.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No entries recorded for this date yet.</td></tr>}
             </tbody>
           </table>
         </div>
