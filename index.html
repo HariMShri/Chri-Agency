@@ -1199,7 +1199,7 @@ function SectionHeader({ title, subtitle, right }) {
 
 /* ---------------------------------- Dashboard page ---------------------------------- */
 
-function DashboardPage({ employees, entries, empById, rates }) {
+function DashboardPage({ employees, entries, empById, rates, vendors = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const t = today();
   const [mStart, mEnd] = [startOfMonth(t), endOfMonth(t)];
@@ -1209,6 +1209,19 @@ function DashboardPage({ employees, entries, empById, rates }) {
 
   const activeEmp = employees.filter((e) => e.status === 'Active').length;
 
+  // Vendor payout this month: each vendor's rate × products delivered by their assigned
+  // employees. This is money the business pays out, so it comes off net profit here too.
+  const vendorBreakdown = vendors.map((v) => {
+    const ids = new Set(v.employeeIds || []);
+    const es = monthEntries.filter((en) => ids.has(en.employeeId));
+    const delivered = es.reduce((s, en) => s + en.delivered, 0);
+    const rate = Number(v.amount) || 0;
+    return { ...v, employeeCount: ids.size, delivered, rate, payout: rate * delivered };
+  });
+  const totalVendorPayout = vendorBreakdown.reduce((s, v) => s + v.payout, 0);
+  const netProfit = overall.profit - totalVendorPayout;
+  const netMargin = overall.revenue ? (netProfit / overall.revenue) * 100 : 0;
+
   return (
     <div>
       <SectionHeader title="Dashboard" subtitle={`Business overview for ${t.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}`} />
@@ -1217,7 +1230,13 @@ function DashboardPage({ employees, entries, empById, rates }) {
         <MetricCard label="Total employees" value={employees.length} sub={`${activeEmp} active / ${employees.length - activeEmp} inactive`} icon={Users} tone="navy" />
         <MetricCard label="Deliveries this month" value={overall.delivered.toLocaleString('en-IN')} sub={`${overall.failed} failed of ${overall.assigned} assigned`} icon={Package} tone="amber" />
         <MetricCard label="Revenue this month" value={inr(overall.revenue)} sub="Across both companies" icon={TrendingUp} tone="teal" />
-        <MetricCard label="Net profit this month" value={inr(overall.profit)} sub={`${overall.margin.toFixed(1)}% margin`} tone={overall.profit >= 0 ? 'teal' : 'danger'} icon={Wallet} />
+        <MetricCard
+          label="Net profit this month"
+          value={inr(netProfit)}
+          sub={totalVendorPayout > 0 ? `${netMargin.toFixed(1)}% margin · after ${inr(totalVendorPayout)} vendor payout` : `${netMargin.toFixed(1)}% margin`}
+          tone={netProfit >= 0 ? 'teal' : 'danger'}
+          icon={Wallet}
+        />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 16, marginBottom: 22 }}>
@@ -1278,6 +1297,28 @@ function DashboardPage({ employees, entries, empById, rates }) {
           );
         })}
       </div>
+
+      {vendorBreakdown.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>Vendors this month</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0,1fr))', gap: 16 }}>
+            {vendorBreakdown.map((v) => (
+              <div key={v.id} className="edm-card" style={{ padding: 18 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+                  <Building2 size={16} color="var(--navy)" />
+                  <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>{v.name}</h3>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+                  <div><div className="edm-label">Employees</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{v.employeeCount}</div></div>
+                  <div><div className="edm-label">Delivered</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{v.delivered}</div></div>
+                  <div><div className="edm-label">Rate</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{inr(v.rate)}</div></div>
+                  <div><div className="edm-label">Payable</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15, color: 'var(--amber-dark)' }}>{inr(v.payout)}</div></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4135,17 +4176,17 @@ function DashboardApp({ currentUser, onLogout }) {
   const renderPage = () => {
     if (page.startsWith('revenue:')) {
       const company = page.slice('revenue:'.length);
-      if (!companies.includes(company)) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
+      if (!companies.includes(company)) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       return <RevenuePage company={company} employees={employees} entries={entries} empById={empById} rates={rates} />;
     }
     if (page.startsWith('vendor:')) {
       const vendorId = page.slice('vendor:'.length);
       const vendor = vendors.find((v) => v.id === vendorId);
-      if (!vendor) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
+      if (!vendor) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       return <VendorPage vendor={vendor} employees={employees} entries={entries} empById={empById} rates={rates} onManage={() => setPage('settings')} />;
     }
     switch (page) {
-      case 'dashboard': return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
+      case 'dashboard': return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       case 'employees': return <EmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} entries={entries} rates={rates} />;
       case 'inactiveEmployees': return <InactiveEmployeesPage employees={employees} setEmployees={setEmployees} empById={empById} rates={rates} />;
       case 'dailyEntry': return <DailyEntryPage employees={employees} entries={entries} setEntries={setEntries} empById={empById} rates={rates} />;
