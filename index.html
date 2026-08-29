@@ -1007,6 +1007,119 @@ function Modal({ title, onClose, children, width = 480 }) {
   );
 }
 
+/* ---------------------------------- Sortable / filterable table headers ----------------------------------
+   Generic helper used by every data table in the app: click a column header to sort by it (toggling
+   asc/desc), and use the small control under the label to filter that column — a text box for free-text
+   columns or a dropdown for columns with a fixed set of values. Kept generic so each page just declares
+   its columns once instead of hand-rolling sorting/filtering per table. */
+function useTableControls() {
+  const [sort, setSort] = useState({ key: null, dir: 'asc' });
+  const [filters, setFilters] = useState({});
+  const toggleSort = (key) => setSort((s) => (s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }));
+  const setFilter = (key, value) => setFilters((f) => ({ ...f, [key]: value }));
+  const clearFilters = () => setFilters({});
+
+  const apply = (rows, columns) => {
+    let out = rows;
+    columns.forEach((col) => {
+      const val = filters[col.key];
+      if (val === undefined || val === null || val === '') return;
+      out = out.filter((row) => {
+        const cell = col.getValue(row);
+        if (col.filterType === 'select') return String(cell ?? '') === val;
+        return String(cell ?? '').toLowerCase().includes(String(val).toLowerCase());
+      });
+    });
+    if (sort.key) {
+      const col = columns.find((c) => c.key === sort.key);
+      if (col) {
+        out = [...out].sort((a, b) => {
+          const av = col.getValue(a);
+          const bv = col.getValue(b);
+          const aEmpty = av === null || av === undefined || av === '';
+          const bEmpty = bv === null || bv === undefined || bv === '';
+          if (aEmpty && bEmpty) return 0;
+          if (aEmpty) return 1;
+          if (bEmpty) return -1;
+          if (typeof av === 'number' && typeof bv === 'number') return av - bv;
+          return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' });
+        });
+        out = sort.dir === 'asc' ? out : out.reverse();
+      }
+    }
+    return out;
+  };
+
+  const activeCount = Object.values(filters).filter((v) => v !== undefined && v !== null && v !== '').length;
+  return { sort, toggleSort, filters, setFilter, clearFilters, activeCount, apply };
+}
+
+// A <th> that's clickable to sort, and carries a small filter control (text input or select)
+// for that column. Pass column=null for a plain, non-interactive header cell (e.g. an actions column).
+function SortFilterTh({ label, column, sort, onSort, filterValue, onFilterChange, style }) {
+  if (!column) return <th style={style}>{label}</th>;
+  const isActive = sort.key === column.key;
+  return (
+    <th style={{ verticalAlign: 'bottom', ...style }}>
+      <div
+        style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', userSelect: 'none' }}
+        onClick={() => onSort(column.key)}
+        title={`Sort by ${label}`}
+      >
+        {label}
+        <span style={{ fontSize: 9, opacity: isActive ? 1 : 0.35 }}>{isActive ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+      </div>
+      {column.filterType && column.filterType !== 'none' && (
+        column.filterType === 'select' ? (
+          <select
+            className="edm-select"
+            style={{ marginTop: 5, padding: '3px 6px', fontSize: 11, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}
+            value={filterValue || ''}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onFilterChange(column.key, e.target.value)}
+          >
+            <option value="">All</option>
+            {column.filterOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+          </select>
+        ) : (
+          <input
+            className="edm-input"
+            style={{ marginTop: 5, padding: '3px 6px', fontSize: 11, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}
+            value={filterValue || ''}
+            placeholder="Filter…"
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => onFilterChange(column.key, e.target.value)}
+          />
+        )
+      )}
+    </th>
+  );
+}
+
+// Renders a full <thead><tr> from a column config array. Each column: { key, label, getValue,
+// filterType: 'text'|'select'|'none', filterOptions? }. Non-sortable extra cells (checkboxes, actions)
+// can be mixed in via `extraCells` — an array of { position: 'start'|'end', content, style }.
+function SortFilterHead({ columns, controls, extraStart, extraEnd }) {
+  return (
+    <thead><tr>
+      {extraStart}
+      {columns.map((col) => (
+        <SortFilterTh
+          key={col.key}
+          label={col.label}
+          column={col.filterType === 'none' ? { key: col.key } : col}
+          sort={controls.sort}
+          onSort={controls.toggleSort}
+          filterValue={controls.filters[col.key]}
+          onFilterChange={controls.setFilter}
+          style={col.style}
+        />
+      ))}
+      {extraEnd}
+    </tr></thead>
+  );
+}
+
 function FilterBar({ preset, setPreset, customStart, customEnd, setCustomStart, setCustomEnd, employeeFilter, setEmployeeFilter, employees, companyFilter, setCompanyFilter, showCompany = true, showEmployee = true }) {
   const COMPANIES = useContext(CompaniesContext);
   return (
@@ -1362,9 +1475,26 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
     return `${s.label} (₹${s.perDelivery}${s.petrol ? ' + petrol' : ''})`;
   };
 
+  const monthEntries = useMemo(() => entries.filter((en) => inRange(en.date, startOfMonth(today()), endOfMonth(today()))), [entries]);
+  const deliveredThisMonth = (empId) => monthEntries.filter((en) => en.employeeId === empId).reduce((s, en) => s + en.delivered, 0);
+
+  const tableControls = useTableControls();
+  const columns = [
+    { key: 'id', label: 'ID', getValue: (e) => e.id, filterType: 'text' },
+    { key: 'name', label: 'Name', getValue: (e) => e.name, filterType: 'text' },
+    { key: 'mobile', label: 'Mobile', getValue: (e) => e.mobile, filterType: 'text' },
+    { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'select', filterOptions: COMPANIES },
+    { key: 'salaryMethod', label: 'Salary method', getValue: (e) => methodLabel(e.salaryMethod), filterType: 'text' },
+    { key: 'bank', label: 'Bank / UPI', getValue: (e) => e.upiId || e.bankAccountNumber || e.bankAccountName || '', filterType: 'text' },
+    { key: 'joiningDate', label: 'Joined', getValue: (e) => e.joiningDate, filterType: 'text' },
+    { key: 'status', label: 'Status', getValue: (e) => e.status, filterType: 'select', filterOptions: ['Active', 'Inactive'] },
+    { key: 'delivered', label: 'Delivered (month)', getValue: (e) => deliveredThisMonth(e.id), filterType: 'text' },
+  ];
+  const visibleList = tableControls.apply(list, columns);
+
   const exportEmployeesCsv = () => {
     const header = ['ID', 'Name', 'Mobile', 'Address', 'Company', 'Salary method', 'Per delivery (₹)', 'Petrol / day (₹)', 'Joining date', 'Status', 'Relieving date', 'Relieving reason', 'Delivered (this month)', 'UPI ID', 'Bank account name', 'Bank account number', 'IFSC'];
-    const rows = list.map((e) => {
+    const rows = visibleList.map((e) => {
       const s = salaryStructures.find((x) => x.id === e.salaryMethod);
       return [
         e.id, e.name, e.mobile, e.address, e.company,
@@ -1375,9 +1505,6 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
     });
     downloadCsv(`employees_${toISO(today())}.csv`, [header, ...rows]);
   };
-
-  const monthEntries = useMemo(() => entries.filter((en) => inRange(en.date, startOfMonth(today()), endOfMonth(today()))), [entries]);
-  const deliveredThisMonth = (empId) => monthEntries.filter((en) => en.employeeId === empId).reduce((s, en) => s + en.delivered, 0);
 
   const addEmployee = (form) => {
     setEmployees((prev) => [...prev, { ...form, id: `e${uid()}` }]);
@@ -1435,11 +1562,9 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
         <table className="edm-table">
-          <thead><tr>
-            <th>ID</th><th>Name</th><th>Mobile</th><th>Company</th><th>Salary method</th><th>Bank / UPI</th><th>Joined</th><th>Status</th><th>Delivered (month)</th><th></th>
-          </tr></thead>
+          <SortFilterHead columns={columns} controls={tableControls} extraEnd={<th></th>} />
           <tbody>
-            {list.map((e) => (
+            {visibleList.map((e) => (
               <tr key={e.id}>
                 <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{e.id}</td>
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
@@ -1458,7 +1583,7 @@ function EmployeesPage({ employees, setEmployees, empById, entries, rates }) {
                 </td>
               </tr>
             ))}
-            {list.length === 0 && <tr><td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
+            {visibleList.length === 0 && <tr><td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees found.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1506,9 +1631,21 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
     .filter((e) => e.status === 'Inactive' && (companyFilter === 'All' || e.company === companyFilter))
     .sort((a, b) => (b.relievingDate || '').localeCompare(a.relievingDate || ''));
 
+  const tableControls = useTableControls();
+  const columns = [
+    { key: 'name', label: 'Name', getValue: (e) => e.name, filterType: 'text' },
+    { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'select', filterOptions: COMPANIES },
+    { key: 'salaryMethod', label: 'Salary method', getValue: (e) => methodLabel(e.salaryMethod), filterType: 'text' },
+    { key: 'joiningDate', label: 'Joined', getValue: (e) => e.joiningDate, filterType: 'text' },
+    { key: 'relievingDate', label: 'Relieved', getValue: (e) => e.relievingDate || '', filterType: 'text' },
+    { key: 'daysActive', label: 'Days active', getValue: (e) => daysBetween(e.joiningDate, e.relievingDate) ?? '', filterType: 'text' },
+    { key: 'relievingReason', label: 'Reason', getValue: (e) => e.relievingReason || '', filterType: 'text' },
+  ];
+  const visibleList = tableControls.apply(list, columns);
+
   const exportCsv = () => {
     const header = ['ID', 'Name', 'Company', 'Salary method', 'Joining date', 'Relieving date', 'Days active', 'Reason'];
-    const rows = list.map((e) => [
+    const rows = visibleList.map((e) => [
       e.id, e.name, e.company, methodLabel(e.salaryMethod),
       e.joiningDate, e.relievingDate || '', daysBetween(e.joiningDate, e.relievingDate) ?? '', e.relievingReason || '',
     ]);
@@ -1562,11 +1699,9 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
         <table className="edm-table">
-          <thead><tr>
-            <th>Name</th><th>Company</th><th>Salary method</th><th>Joined</th><th>Relieved</th><th>Days active</th><th>Reason</th><th></th>
-          </tr></thead>
+          <SortFilterHead columns={columns} controls={tableControls} extraEnd={<th></th>} />
           <tbody>
-            {list.map((e) => {
+            {visibleList.map((e) => {
               const days = daysBetween(e.joiningDate, e.relievingDate);
               return (
                 <tr key={e.id}>
@@ -1591,7 +1726,7 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
                 </tr>
               );
             })}
-            {list.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No inactive employees{companyFilter !== 'All' ? ` for ${companyFilter}` : ''} on record.</td></tr>}
+            {visibleList.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No inactive employees{companyFilter !== 'All' ? ` for ${companyFilter}` : ''} on record.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1618,6 +1753,7 @@ function InactiveEmployeesPage({ employees, setEmployees, empById, rates }) {
 /* ---------------------------------- Daily Delivery Entry page ---------------------------------- */
 
 function QuickEntryGrid({ date, company, employees, entries, setEntries, empById }) {
+  const COMPANIES = useContext(CompaniesContext);
   const activeEmployees = useMemo(
     () => employees.filter((e) => e.status === 'Active' && (company === 'All' || e.company === company)),
     [employees, company]
@@ -1665,6 +1801,17 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
     setTimeout(() => setFlash((f) => ({ ...f, [employeeId]: false })), 1400);
   };
 
+  const tableControls = useTableControls();
+  const columns = [
+    { key: 'employee', label: 'Employee', getValue: (r) => empById[r.employeeId]?.name || r.employeeId, filterType: 'text' },
+    { key: 'company', label: 'Company', getValue: (r) => empById[r.employeeId]?.company || '', filterType: 'select', filterOptions: COMPANIES },
+    { key: 'assigned', label: 'Assigned', getValue: (r) => Number(r.assigned) || 0, filterType: 'text' },
+    { key: 'delivered', label: 'Delivered', getValue: (r) => Number(r.delivered) || 0, filterType: 'text' },
+    { key: 'failed', label: 'Failed', getValue: (r) => Math.max(0, (Number(r.assigned) || 0) - Math.min(Number(r.assigned) || 0, Number(r.delivered) || 0)), filterType: 'text' },
+    { key: 'remarks', label: 'Remarks', getValue: (r) => r.remarks || '', filterType: 'text' },
+  ];
+  const visibleRows = tableControls.apply(rows, columns);
+
   if (activeEmployees.length === 0) {
     return (
       <div className="edm-card" style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', marginBottom: 16, fontSize: 13 }}>
@@ -1680,11 +1827,9 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
         <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>Every active employee is listed already — fill in numbers and click away to save, no need to add each one manually.</p>
       </div>
       <table className="edm-table">
-        <thead><tr>
-          <th>Employee</th><th>Company</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Remarks</th><th style={{ width: 60 }}></th>
-        </tr></thead>
+        <SortFilterHead columns={columns} controls={tableControls} extraEnd={<th style={{ width: 60 }}></th>} />
         <tbody>
-          {rows.map((row) => {
+          {visibleRows.map((row) => {
             const emp = empById[row.employeeId];
             const assigned = Number(row.assigned) || 0;
             const delivered = Math.min(assigned, Number(row.delivered) || 0);
@@ -1723,6 +1868,7 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
               </tr>
             );
           })}
+          {visibleRows.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees match the current filters.</td></tr>}
         </tbody>
       </table>
     </div>
@@ -1740,13 +1886,29 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
   const dayEntries = entries.filter((en) => en.date === date && (company === 'All' || en.company === company));
   const dayAgg = aggregate(dayEntries, empById, rates);
 
+  const tableControls = useTableControls();
+  const reportColumns = [
+    { key: 'employee', label: 'Employee', getValue: (en) => empById[en.employeeId]?.name || 'Unknown', filterType: 'text' },
+    { key: 'assigned', label: 'Assigned', getValue: (en) => en.assigned, filterType: 'text' },
+    { key: 'delivered', label: 'Delivered', getValue: (en) => en.delivered, filterType: 'text' },
+    { key: 'failed', label: 'Failed', getValue: (en) => en.failed, filterType: 'text' },
+    { key: 'successRate', label: 'Success %', getValue: (en) => en.assigned ? (en.delivered / en.assigned) * 100 : 0, filterType: 'text' },
+    { key: 'remarks', label: 'Remarks', getValue: (en) => en.remarks || '', filterType: 'text' },
+  ];
+  const visibleEntries = tableControls.apply(dayEntries, reportColumns);
+
   // Which employees' rows to include when the report is exported/shared. Empty selection
-  // means "everyone" — checking specific employees narrows the shared report to just them.
+  // means "everyone visible" — checking specific employees narrows the shared report to just them.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   useEffect(() => { setSelectedIds(new Set()); }, [date, company]);
 
-  const allSelected = dayEntries.length > 0 && dayEntries.every((en) => selectedIds.has(en.id));
-  const toggleAll = () => setSelectedIds(allSelected ? new Set() : new Set(dayEntries.map((en) => en.id)));
+  const allSelected = visibleEntries.length > 0 && visibleEntries.every((en) => selectedIds.has(en.id));
+  const toggleAll = () => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (allSelected) visibleEntries.forEach((en) => next.delete(en.id));
+    else visibleEntries.forEach((en) => next.add(en.id));
+    return next;
+  });
   const toggleOne = (id) => setSelectedIds((prev) => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -1755,7 +1917,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
   const clearSelection = () => setSelectedIds(new Set());
 
   const hasSelection = selectedIds.size > 0;
-  const reportEntries = hasSelection ? dayEntries.filter((en) => selectedIds.has(en.id)) : dayEntries;
+  const reportEntries = hasSelection ? visibleEntries.filter((en) => selectedIds.has(en.id)) : visibleEntries;
   const reportAgg = aggregate(reportEntries, empById, rates);
 
   const { toast, showUndo, dismiss } = useUndoToast();
@@ -1896,14 +2058,18 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
         </div>
         <div className="edm-card edm-scroll" style={{ overflowX: 'auto', borderRadius: '0 0 12px 12px' }}>
           <table className="edm-table">
-            <thead><tr>
-              <th className="no-print" style={{ width: 34 }}>
-                <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={dayEntries.length === 0} title="Select all" />
-              </th>
-              <th>Employee</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Success %</th><th>Remarks</th><th className="no-print"></th>
-            </tr></thead>
+            <SortFilterHead
+              columns={reportColumns}
+              controls={tableControls}
+              extraStart={
+                <th className="no-print" style={{ width: 34 }}>
+                  <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={visibleEntries.length === 0} title="Select all" />
+                </th>
+              }
+              extraEnd={<th className="no-print"></th>}
+            />
             <tbody>
-              {dayEntries.map((en) => {
+              {visibleEntries.map((en) => {
                 const emp = empById[en.employeeId];
                 const rate = en.assigned ? (en.delivered / en.assigned) * 100 : 0;
                 const isSelected = selectedIds.has(en.id);
@@ -1930,7 +2096,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                   </tr>
                 );
               })}
-              {dayEntries.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No entries recorded for this date yet.</td></tr>}
+              {visibleEntries.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>{dayEntries.length === 0 ? 'No entries recorded for this date yet.' : 'No entries match the current filters.'}</td></tr>}
             </tbody>
           </table>
         </div>
@@ -2219,6 +2385,15 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
     return { ...e, delivered: a.delivered, revenue: a.revenue };
   }).sort((a, b) => b.revenue - a.revenue);
 
+  const tableControls = useTableControls();
+  const revenueColumns = [
+    { key: 'name', label: 'Employee', getValue: (e) => e.name, filterType: 'text' },
+    { key: 'status', label: 'Status', getValue: (e) => e.status, filterType: 'select', filterOptions: ['Active', 'Inactive'] },
+    { key: 'delivered', label: 'Delivered (range)', getValue: (e) => e.delivered, filterType: 'text' },
+    { key: 'revenue', label: 'Revenue generated', getValue: (e) => e.revenue, filterType: 'text' },
+  ];
+  const visibleRevenue = tableControls.apply(empRevenue, revenueColumns);
+
   return (
     <div>
       <SectionHeader title={`${company} — revenue`} subtitle={`₹${rates.revenue[company]} per successful delivery`} />
@@ -2261,9 +2436,9 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
         <table className="edm-table">
-          <thead><tr><th>Employee</th><th>Status</th><th>Delivered (range)</th><th>Revenue generated</th></tr></thead>
+          <SortFilterHead columns={revenueColumns} controls={tableControls} />
           <tbody>
-            {empRevenue.map((e) => (
+            {visibleRevenue.map((e) => (
               <tr key={e.id}>
                 <td style={{ fontWeight: 600 }}>{e.name}</td>
                 <td><StatusBadge status={e.status} /></td>
@@ -2271,6 +2446,7 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
                 <td className="font-mono" style={{ fontWeight: 600 }}>{inr(e.revenue)}</td>
               </tr>
             ))}
+            {visibleRevenue.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees match the current filters.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -2559,6 +2735,7 @@ function PayslipsTab({ employees, entries, rates }) {
 /* ---------------------------------- Salary Management page ---------------------------------- */
 
 function SalaryPage({ employees, entries, rates }) {
+  const COMPANIES = useContext(CompaniesContext);
   const [tab, setTab] = useState('overview');
   const [preset, setPreset] = useState('thisMonth');
   const [customStart, setCustomStart] = useState(toISO(today()));
@@ -2585,11 +2762,27 @@ function SalaryPage({ employees, entries, rates }) {
 
   const markPaid = (id) => setPaidIds((prev) => new Set(prev).add(id));
 
+  const tableControls = useTableControls();
+  const salaryColumns = [
+    { key: 'name', label: 'Employee', getValue: (r) => r.name, filterType: 'text' },
+    { key: 'company', label: 'Company', getValue: (r) => r.company, filterType: 'select', filterOptions: COMPANIES },
+    { key: 'status', label: 'Status', getValue: (r) => r.status, filterType: 'select', filterOptions: ['Active', 'Inactive'] },
+    { key: 'method', label: 'Method', getValue: (r) => findSalaryStructure(rates, r.salaryMethod).label || '—', filterType: 'text' },
+    { key: 'rate', label: 'Salary rate', getValue: (r) => findSalaryStructure(rates, r.salaryMethod).perDelivery, filterType: 'text' },
+    { key: 'days', label: 'Working days', getValue: (r) => r.days, filterType: 'text' },
+    { key: 'delivered', label: 'Delivered', getValue: (r) => r.delivered, filterType: 'text' },
+    { key: 'pay', label: 'Payroll', getValue: (r) => r.pay, filterType: 'text' },
+    { key: 'petrol', label: 'Petrol', getValue: (r) => r.petrol, filterType: 'text' },
+    { key: 'total', label: 'Total salary', getValue: (r) => r.total, filterType: 'text' },
+    { key: 'bank', label: 'Bank / UPI', getValue: (r) => r.upiId || r.bankAccountNumber || r.bankAccountName || '', filterType: 'text' },
+  ];
+  const visibleRows = tableControls.apply(rows, salaryColumns);
+
   // Exports a bank-portal-ready payout file: most Indian business/current accounts let you bulk-upload
   // a CSV like this (Account No, IFSC, Name, Amount, Narration) to pay many employees via NEFT/IMPS in
   // one batch, without needing a payment-gateway API integration.
   const exportBankFile = () => {
-    const payable = rows.filter((r) => r.total > 0);
+    const payable = visibleRows.filter((r) => r.total > 0);
     const header = ['Beneficiary name', 'Account number', 'IFSC', 'UPI ID', 'Amount (INR)', 'Narration'];
     const csvRows = payable.map((r) => [
       r.bankAccountName || r.name, r.bankAccountNumber || '', r.bankIfsc || '', r.upiId || '',
@@ -2644,15 +2837,15 @@ function SalaryPage({ employees, entries, rates }) {
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
-        <span className="edm-label" style={{ marginBottom: 0 }}>Payroll ({rows.length} employee{rows.length === 1 ? '' : 's'})</span>
+        <span className="edm-label" style={{ marginBottom: 0 }}>Payroll ({visibleRows.length} employee{visibleRows.length === 1 ? '' : 's'})</span>
         <button className="edm-btn edm-btn-ghost" onClick={exportBankFile}><Download size={14} /> Export bank payout file (CSV)</button>
       </div>
 
       <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
         <table className="edm-table">
-          <thead><tr><th>Employee</th><th>Company</th><th>Status</th><th>Method</th><th>Salary rate</th><th>Working days</th><th>Delivered</th><th>Payroll</th><th>Petrol</th><th>Total salary</th><th>Bank / UPI</th><th>Payout</th></tr></thead>
+          <SortFilterHead columns={salaryColumns} controls={tableControls} extraEnd={<th>Payout</th>} />
           <tbody>
-            {rows.map((r) => {
+            {visibleRows.map((r) => {
               const structure = findSalaryStructure(rates, r.salaryMethod);
               return (
               <tr key={r.id}>
@@ -2684,7 +2877,7 @@ function SalaryPage({ employees, entries, rates }) {
               </tr>
               );
             })}
-            {rows.length === 0 && <tr><td colSpan={12} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees in this view.</td></tr>}
+            {visibleRows.length === 0 && <tr><td colSpan={12} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees in this view.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -2774,7 +2967,17 @@ function ReportPage({ level, employees, entries, empById, rates }) {
     const es = filtered.filter((en) => en.employeeId === e.id);
     const a = aggregate(es, empById, rates);
     return { ...e, ...a };
-  }).filter((e) => e.assigned > 0).sort((a, b) => b.delivered - a.delivered);
+  }).filter((e) => e.assigned > 0).sort((a, b) => b.delivered - a.delivered).map((e, i) => ({ ...e, rank: i + 1 }));
+
+  const rankingControls = useTableControls();
+  const rankingColumns = [
+    { key: 'rank', label: '#', getValue: (e) => e.rank, filterType: 'none' },
+    { key: 'name', label: 'Employee', getValue: (e) => e.name, filterType: 'text' },
+    { key: 'delivered', label: 'Delivered', getValue: (e) => e.delivered, filterType: 'text' },
+    { key: 'successRate', label: 'Success', getValue: (e) => e.successRate, filterType: 'text' },
+    { key: 'salary', label: 'Salary', getValue: (e) => e.payroll + e.petrol, filterType: 'text' },
+  ];
+  const visibleEmpPerf = rankingControls.apply(empPerf, rankingColumns);
 
   const companyPerf = COMPANIES.map((c) => {
     const ce = filtered.filter((en) => en.company === c);
@@ -2830,18 +3033,18 @@ function ReportPage({ level, employees, entries, empById, rates }) {
           <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>Employee rankings</h3>
           <div className="edm-scroll" style={{ maxHeight: 280, overflowY: 'auto' }}>
             <table className="edm-table">
-              <thead><tr><th>#</th><th>Employee</th><th>Delivered</th><th>Success</th><th>Salary</th></tr></thead>
+              <SortFilterHead columns={rankingColumns} controls={rankingControls} />
               <tbody>
-                {empPerf.map((e, i) => (
+                {visibleEmpPerf.map((e) => (
                   <tr key={e.id}>
-                    <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
+                    <td className="font-mono" style={{ color: 'var(--text-muted)' }}>{e.rank}</td>
                     <td style={{ fontWeight: 600 }}>{e.name}</td>
                     <td className="font-mono">{e.delivered}</td>
                     <td className="font-mono">{pct(e.successRate)}</td>
                     <td className="font-mono">{inr(e.payroll + e.petrol)}</td>
                   </tr>
                 ))}
-                {empPerf.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 20 }}>No activity in this range.</td></tr>}
+                {visibleEmpPerf.length === 0 && <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 20 }}>{empPerf.length === 0 ? 'No activity in this range.' : 'No employees match the current filters.'}</td></tr>}
               </tbody>
             </table>
           </div>
