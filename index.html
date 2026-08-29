@@ -290,7 +290,7 @@ const PRESETS = [
   { id: 'custom', label: 'Custom range' },
 ];
 
-function buildNav(companies) {
+function buildNav(companies, vendors) {
   return [
     { section: 'Overview', items: [
       { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -305,6 +305,9 @@ function buildNav(companies) {
       { id: 'salary', label: 'Salary management', icon: Wallet },
       { id: 'pnl', label: 'Profit and loss', icon: TrendingUp },
     ]},
+    // One nav item per vendor — added/removed here automatically as vendors are
+    // added/removed from Settings, so the tab list always matches the vendor list.
+    { section: 'Vendors', items: (vendors || []).map((v) => ({ id: `vendor:${v.id}`, label: v.name, icon: Building2 })) },
     { section: 'Reports', items: [
       { id: 'reportDaily', label: 'Daily reports', icon: FileBarChart },
       { id: 'reportWeekly', label: 'Weekly reports', icon: FileBarChart },
@@ -1466,12 +1469,12 @@ function downloadJson(filename, data) {
 }
 
 // Bundles every piece of persisted app data into one exportable object.
-function buildBackupPayload({ companies, employees, entries, rates, hubLocations }) {
+function buildBackupPayload({ companies, employees, entries, rates, hubLocations, vendors }) {
   return {
     schema: 'edm-backup',
     version: BACKUP_SCHEMA_VERSION,
     exportedAt: new Date().toISOString(),
-    companies, employees, entries, rates, hubLocations: hubLocations || [],
+    companies, employees, entries, rates, hubLocations: hubLocations || [], vendors: vendors || [],
   };
 }
 
@@ -2495,6 +2498,64 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
   );
 }
 
+/* ---------------------------------- Vendor page (per vendor) ---------------------------------- */
+
+function VendorPage({ vendor, employees, entries, onManage }) {
+  const assignedEmployees = employees.filter((e) => (vendor.employeeIds || []).includes(e.id));
+  const activeCount = assignedEmployees.filter((e) => e.status === 'Active').length;
+
+  const monthEntries = useMemo(() => entries.filter((en) => inRange(en.date, startOfMonth(today()), endOfMonth(today()))), [entries]);
+  const deliveredThisMonth = (empId) => monthEntries.filter((en) => en.employeeId === empId).reduce((s, en) => s + en.delivered, 0);
+
+  const tableControls = useTableControls();
+  const columns = [
+    { key: 'name', label: 'Employee', getValue: (e) => e.name, filterType: 'text' },
+    { key: 'company', label: 'Company', getValue: (e) => e.company, filterType: 'text' },
+    { key: 'hubLocation', label: 'Hub location', getValue: (e) => e.hubLocation || '', filterType: 'text' },
+    { key: 'status', label: 'Status', getValue: (e) => e.status, filterType: 'select', filterOptions: ['Active', 'Inactive'] },
+    { key: 'delivered', label: 'Delivered (month)', getValue: (e) => deliveredThisMonth(e.id), filterType: 'text' },
+  ];
+  const visibleList = tableControls.apply(assignedEmployees, columns);
+
+  return (
+    <div>
+      <SectionHeader
+        title={vendor.name}
+        subtitle={`${assignedEmployees.length} employee${assignedEmployees.length === 1 ? '' : 's'} assigned · ${activeCount} active`}
+        right={<button className="edm-btn edm-btn-ghost" onClick={onManage}><SettingsIcon size={15} /> Manage in Settings</button>}
+      />
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 14, marginBottom: 20 }}>
+        <MetricCard label="Amount payable to vendor" value={inr(vendor.amount)} icon={Wallet} tone="amber" />
+        <MetricCard label="Employees assigned" value={assignedEmployees.length} icon={Users} tone="navy" />
+        <MetricCard label="Active among them" value={activeCount} icon={CheckCircle2} tone="teal" />
+      </div>
+
+      <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
+        <table className="edm-table">
+          <SortFilterHead columns={columns} controls={tableControls} />
+          <tbody>
+            {visibleList.map((e) => (
+              <tr key={e.id}>
+                <td style={{ fontWeight: 600 }}>{e.name}</td>
+                <td>{e.company}</td>
+                <td style={{ color: e.hubLocation ? 'var(--text)' : 'var(--text-muted)' }}>{e.hubLocation || '—'}</td>
+                <td><StatusBadge status={e.status} /></td>
+                <td className="font-mono">{deliveredThisMonth(e.id)}</td>
+              </tr>
+            ))}
+            {visibleList.length === 0 && (
+              <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>
+                {assignedEmployees.length === 0 ? 'No employees assigned to this vendor yet — add some from Settings.' : 'No employees match the current filters.'}
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- Pay slips ---------------------------------- */
 
 function periodLabelForRange(start, end) {
@@ -3241,9 +3302,62 @@ function PnLPage({ employees, entries, empById, rates }) {
   );
 }
 
+/* ---------------------------------- Vendor form (add/edit, from Settings) ---------------------------------- */
+
+function VendorForm({ initial, employees, onSave, onClose }) {
+  const [form, setForm] = useState(initial);
+  const [employeeSearch, setEmployeeSearch] = useState('');
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const isEdit = !!initial.id;
+
+  const toggleEmployee = (id) => setForm((f) => {
+    const has = f.employeeIds.includes(id);
+    return { ...f, employeeIds: has ? f.employeeIds.filter((x) => x !== id) : [...f.employeeIds, id] };
+  });
+
+  const filteredEmployees = employees.filter((e) => e.name.toLowerCase().includes(employeeSearch.trim().toLowerCase()));
+
+  return (
+    <Modal title={isEdit ? 'Edit vendor' : 'Add vendor'} onClose={onClose} width={480}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div><label className="edm-label">Vendor name</label><input className="edm-input" value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="e.g. Sri Logistics" /></div>
+        <div><label className="edm-label">Amount payable to vendor (₹)</label><input type="number" min="0" className="edm-input" value={form.amount} onChange={(e) => set('amount', e.target.value)} placeholder="0" /></div>
+
+        <div>
+          <label className="edm-label">Employees under this vendor ({form.employeeIds.length} selected)</label>
+          <input className="edm-input" style={{ marginBottom: 8 }} placeholder="Search employees…" value={employeeSearch} onChange={(e) => setEmployeeSearch(e.target.value)} />
+          <div className="edm-scroll" style={{ maxHeight: 220, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: 4 }}>
+            {filteredEmployees.length === 0 && (
+              <div style={{ padding: 12, textAlign: 'center', fontSize: 12.5, color: 'var(--text-muted)' }}>No employees match.</div>
+            )}
+            {filteredEmployees.map((e) => (
+              <label key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>
+                <input type="checkbox" checked={form.employeeIds.includes(e.id)} onChange={() => toggleEmployee(e.id)} />
+                <span style={{ flex: 1 }}>{e.name}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{e.company}{e.status === 'Inactive' ? ' · inactive' : ''}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+          <button
+            className="edm-btn edm-btn-amber"
+            style={{ flex: 1, justifyContent: 'center' }}
+            onClick={() => form.name.trim() && onSave({ ...form, name: form.name.trim(), amount: Number(form.amount) || 0 })}
+          >
+            {isEdit ? 'Save changes' : 'Add vendor'}
+          </button>
+          <button className="edm-btn edm-btn-ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 /* ---------------------------------- Settings page ---------------------------------- */
 
-function SettingsPage({ rates, setRates, employees = [], entries = [], companies, setCompanies, hubLocations = [], setHubLocations, setEmployees, setEntries, lastExportAt, onDataExported, onDataImported }) {
+function SettingsPage({ rates, setRates, employees = [], entries = [], companies, setCompanies, hubLocations = [], setHubLocations, vendors = [], setVendors, setEmployees, setEntries, lastExportAt, onDataExported, onDataImported }) {
   const [form, setForm] = useState(rates);
   const [saved, setSaved] = useState(false);
   const [removeId, setRemoveId] = useState(null);
@@ -3254,6 +3368,8 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const [newHubLocationName, setNewHubLocationName] = useState('');
   const [hubLocationError, setHubLocationError] = useState('');
   const [removeHubLocation, setRemoveHubLocation] = useState(null);
+  const [vendorModal, setVendorModal] = useState(null);
+  const [removeVendorTarget, setRemoveVendorTarget] = useState(null);
   const [importError, setImportError] = useState('');
   const [importSuccess, setImportSuccess] = useState('');
   const [pendingImport, setPendingImport] = useState(null); // parsed data awaiting confirmation
@@ -3262,7 +3378,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const save = () => { setRates(form); setSaved(true); setTimeout(() => setSaved(false), 1800); };
 
   const exportAllData = () => {
-    const payload = buildBackupPayload({ companies, employees, entries, rates, hubLocations });
+    const payload = buildBackupPayload({ companies, employees, entries, rates, hubLocations, vendors });
     downloadJson(`deliveryops_backup_${toISO(today())}.json`, payload);
     onDataExported && onDataExported();
   };
@@ -3296,6 +3412,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
     setRates(pendingImport.rates);
     setForm(pendingImport.rates);
     setHubLocations(Array.isArray(pendingImport.hubLocations) ? pendingImport.hubLocations : []);
+    setVendors(Array.isArray(pendingImport.vendors) ? pendingImport.vendors : []);
     setPendingImport(null);
     setImportSuccess(`Import complete — restored ${pendingImport.employees.length} employees and ${pendingImport.entries.length} entries.`);
     onDataImported && onDataImported();
@@ -3356,6 +3473,19 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const confirmRemoveHubLocation = (name) => {
     setHubLocations((prev) => prev.filter((h) => h !== name));
     setRemoveHubLocation(null);
+  };
+
+  const addVendor = (form) => {
+    setVendors((prev) => [...prev, { ...form, id: `vendor_${uid()}` }]);
+    setVendorModal(null);
+  };
+  const updateVendor = (form) => {
+    setVendors((prev) => prev.map((v) => (v.id === form.id ? form : v)));
+    setVendorModal(null);
+  };
+  const confirmRemoveVendor = (id) => {
+    setVendors((prev) => prev.filter((v) => v.id !== id));
+    setRemoveVendorTarget(null);
   };
 
   return (
@@ -3521,6 +3651,39 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
         </div>
       </div>
 
+      <div className="edm-card" style={{ padding: 20, marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
+          <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>Vendors</h3>
+          <button className="edm-btn edm-btn-amber" onClick={() => setVendorModal({ mode: 'add' })}><Plus size={15} /> Add vendor</button>
+        </div>
+        <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 14px' }}>
+          Each vendor you add here gets its own tab in the sidebar under "Vendors" — showing the amount payable to them and the employees you assign. Add as many as you need; removing one removes its tab too.
+        </p>
+
+        {vendors.length === 0 ? (
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: 0 }}>No vendors added yet.</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {vendors.map((v) => {
+              const empCount = (v.employeeIds || []).length;
+              return (
+                <div key={v.id} className="edm-card" style={{ padding: 14, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 140 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13.5 }}>{v.name}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{empCount} employee{empCount === 1 ? '' : 's'} assigned</div>
+                  </div>
+                  <div className="font-mono" style={{ fontWeight: 700, fontSize: 14 }}>{inr(v.amount)}</div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button className="edm-btn edm-btn-ghost" style={{ padding: 6 }} onClick={() => setVendorModal({ mode: 'edit', vendor: v })}><Pencil size={13} /></button>
+                    <button className="edm-btn edm-btn-danger-ghost" style={{ padding: 6 }} onClick={() => setRemoveVendorTarget(v)}><Trash2 size={13} /></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button className="edm-btn edm-btn-amber" onClick={save}>Save settings</button>
         {saved && <span style={{ fontSize: 13, color: 'var(--teal-dark)', fontWeight: 600 }}>Settings saved</span>}
@@ -3562,6 +3725,25 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
           <div style={{ display: 'flex', gap: 10 }}>
             <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => confirmRemoveHubLocation(removeHubLocation)}>Remove</button>
             <button className="edm-btn edm-btn-ghost" onClick={() => setRemoveHubLocation(null)}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+      {(vendorModal?.mode === 'add' || vendorModal?.mode === 'edit') && (
+        <VendorForm
+          initial={vendorModal.mode === 'edit' ? { ...vendorModal.vendor, amount: String(vendorModal.vendor.amount), employeeIds: vendorModal.vendor.employeeIds || [] } : { id: '', name: '', amount: '', employeeIds: [] }}
+          employees={employees}
+          onSave={vendorModal.mode === 'edit' ? updateVendor : addVendor}
+          onClose={() => setVendorModal(null)}
+        />
+      )}
+      {removeVendorTarget && (
+        <Modal title="Remove vendor" onClose={() => setRemoveVendorTarget(null)} width={380}>
+          <p style={{ fontSize: 13.5, color: 'var(--text-muted)', margin: '0 0 16px' }}>
+            This removes "{removeVendorTarget.name}" and its sidebar tab. Its employees stay on file — they're just no longer linked to this vendor. This can't be undone.
+          </p>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button className="edm-btn" style={{ flex: 1, justifyContent: 'center', background: 'var(--danger)', color: '#fff' }} onClick={() => confirmRemoveVendor(removeVendorTarget.id)}>Remove</button>
+            <button className="edm-btn edm-btn-ghost" onClick={() => setRemoveVendorTarget(null)}>Cancel</button>
           </div>
         </Modal>
       )}
@@ -3776,6 +3958,7 @@ function App() {
 function DashboardApp({ currentUser, onLogout }) {
   const [companies, setCompanies] = useState(() => loadLS('companies', DEFAULT_COMPANIES));
   const [hubLocations, setHubLocations] = useState(() => loadLS('hubLocations', DEFAULT_HUB_LOCATIONS));
+  const [vendors, setVendors] = useState(() => loadLS('vendors', []));
   const [employees, setEmployees] = useState(() => loadLS('employees', []));
   const [entries, setEntries] = useState(() => loadLS('entries', []));
   const [rates, setRates] = useState(() => loadLS('rates', DEFAULT_RATES));
@@ -3797,6 +3980,7 @@ function DashboardApp({ currentUser, onLogout }) {
           applyingRemoteRef.current = true;
           if (Array.isArray(data.companies)) setCompanies(data.companies);
           if (Array.isArray(data.hubLocations)) setHubLocations(data.hubLocations);
+          if (Array.isArray(data.vendors)) setVendors(data.vendors);
           if (Array.isArray(data.employees)) setEmployees(data.employees);
           if (Array.isArray(data.entries)) setEntries(data.entries);
           if (data.rates) setRates(data.rates);
@@ -3805,7 +3989,7 @@ function DashboardApp({ currentUser, onLogout }) {
         } else if (!hasLoadedRemoteRef.current) {
           // Nothing in Firestore yet — seed it with whatever's already in this browser.
           hasLoadedRemoteRef.current = true;
-          DATA_DOC.set({ companies, hubLocations, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => setSyncStatus('error'));
+          DATA_DOC.set({ companies, hubLocations, vendors, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }).catch(() => setSyncStatus('error'));
         }
       },
       () => setSyncStatus('error')
@@ -3821,17 +4005,18 @@ function DashboardApp({ currentUser, onLogout }) {
     if (applyingRemoteRef.current) { applyingRemoteRef.current = false; return; }
     setSyncStatus('syncing');
     const t = setTimeout(() => {
-      DATA_DOC.set({ companies, hubLocations, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
+      DATA_DOC.set({ companies, hubLocations, vendors, employees, entries, rates, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true })
         .then(() => setSyncStatus('synced'))
         .catch(() => setSyncStatus('error'));
     }, 600);
     return () => clearTimeout(t);
-  }, [companies, hubLocations, employees, entries, rates]);
+  }, [companies, hubLocations, vendors, employees, entries, rates]);
 
   // Keep a local cache too, so the dashboard opens instantly and still works
   // briefly offline (Firestore's own offline cache also helps with this).
   useEffect(() => { saveLS('companies', companies); }, [companies]);
   useEffect(() => { saveLS('hubLocations', hubLocations); }, [hubLocations]);
+  useEffect(() => { saveLS('vendors', vendors); }, [vendors]);
   useEffect(() => { saveLS('employees', employees); }, [employees]);
   useEffect(() => { saveLS('entries', entries); }, [entries]);
   useEffect(() => { saveLS('rates', rates); }, [rates]);
@@ -3842,13 +4027,13 @@ function DashboardApp({ currentUser, onLogout }) {
   const daysSince = (iso) => (iso ? (Date.now() - new Date(iso).getTime()) / 86400000 : Infinity);
   const showBackupReminder = employees.length > 0 && daysSince(lastExportAt) >= 7 && daysSince(reminderSnoozedAt) >= 3;
   const exportFromReminder = () => {
-    const payload = buildBackupPayload({ companies, employees, entries, rates, hubLocations });
+    const payload = buildBackupPayload({ companies, employees, entries, rates, hubLocations, vendors });
     downloadJson(`deliveryops_backup_${toISO(today())}.json`, payload);
     setLastExportAt(new Date().toISOString());
   };
 
   const empById = useMemo(() => Object.fromEntries(employees.map((e) => [e.id, e])), [employees]);
-  const nav = useMemo(() => buildNav(companies), [companies]);
+  const nav = useMemo(() => buildNav(companies, vendors), [companies, vendors]);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const currentNavLabel = useMemo(() => {
     for (const g of nav) { const found = g.items.find((i) => i.id === page); if (found) return found.label; }
@@ -3860,6 +4045,12 @@ function DashboardApp({ currentUser, onLogout }) {
       const company = page.slice('revenue:'.length);
       if (!companies.includes(company)) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
       return <RevenuePage company={company} employees={employees} entries={entries} empById={empById} rates={rates} />;
+    }
+    if (page.startsWith('vendor:')) {
+      const vendorId = page.slice('vendor:'.length);
+      const vendor = vendors.find((v) => v.id === vendorId);
+      if (!vendor) return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
+      return <VendorPage vendor={vendor} employees={employees} entries={entries} onManage={() => setPage('settings')} />;
     }
     switch (page) {
       case 'dashboard': return <DashboardPage employees={employees} entries={entries} empById={empById} rates={rates} />;
@@ -3879,6 +4070,7 @@ function DashboardApp({ currentUser, onLogout }) {
           entries={entries} setEntries={setEntries}
           companies={companies} setCompanies={setCompanies}
           hubLocations={hubLocations} setHubLocations={setHubLocations}
+          vendors={vendors} setVendors={setVendors}
           lastExportAt={lastExportAt}
           onDataExported={() => setLastExportAt(new Date().toISOString())}
           onDataImported={() => setPage('dashboard')}
@@ -3913,7 +4105,7 @@ function DashboardApp({ currentUser, onLogout }) {
         </div>
 
         <div className="edm-scroll" style={{ overflowY: 'auto', flex: 1 }}>
-          {nav.map((group) => (
+          {nav.filter((group) => group.items.length > 0).map((group) => (
             <div key={group.section} style={{ marginBottom: 14 }}>
               <div style={{ color: '#5D6A8C', fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.06em', padding: '4px 10px 6px' }}>{group.section}</div>
               {group.items.map((item) => (
