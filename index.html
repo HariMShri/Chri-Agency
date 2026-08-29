@@ -1570,6 +1570,24 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
   const dayEntries = entries.filter((en) => en.date === date && (company === 'All' || en.company === company));
   const dayAgg = aggregate(dayEntries, empById, rates);
 
+  // Which employees' rows to include when the report is exported/shared. Empty selection
+  // means "everyone" — checking specific employees narrows the shared report to just them.
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  useEffect(() => { setSelectedIds(new Set()); }, [date, company]);
+
+  const allSelected = dayEntries.length > 0 && dayEntries.every((en) => selectedIds.has(en.id));
+  const toggleAll = () => setSelectedIds(allSelected ? new Set() : new Set(dayEntries.map((en) => en.id)));
+  const toggleOne = (id) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const clearSelection = () => setSelectedIds(new Set());
+
+  const hasSelection = selectedIds.size > 0;
+  const reportEntries = hasSelection ? dayEntries.filter((en) => selectedIds.has(en.id)) : dayEntries;
+  const reportAgg = aggregate(reportEntries, empById, rates);
+
   const { toast, showUndo, dismiss } = useUndoToast();
 
   const reportRef = useRef(null);
@@ -1577,31 +1595,45 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
   const dateLabel = fromISO(date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
   const shareReport = () => {
-    if (!reportRef.current || isSharing || typeof html2canvas === 'undefined') return;
+    if (isSharing || !reportRef.current || typeof html2canvas === 'undefined') return;
     setIsSharing(true);
-    html2canvas(reportRef.current, {
-      backgroundColor: '#ffffff',
-      scale: 2,
-      ignoreElements: (el) => el.classList && el.classList.contains('no-print'),
-    }).then((canvas) => {
-      canvas.toBlob((blob) => {
-        if (!blob) { setIsSharing(false); return; }
-        const fileName = `daily-report-${date}${company !== 'All' ? '-' + company.replace(/\s+/g, '') : ''}.png`;
-        const file = new File([blob], fileName, { type: 'image/png' });
-        const finish = () => setIsSharing(false);
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          navigator.share({ files: [file], title: 'Daily delivery report', text: `Daily delivery report — ${dateLabel}` })
-            .catch(() => {}).finally(finish);
-        } else {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); a.remove();
-          URL.revokeObjectURL(url);
-          finish();
-        }
-      }, 'image/png');
-    }).catch(() => setIsSharing(false));
   };
+
+  // isSharing flips true first so the table can hide unselected rows in the DOM; we wait for
+  // that re-render (via requestAnimationFrame) before capturing, so the screenshot matches
+  // exactly what's on screen at the moment of export.
+  useEffect(() => {
+    if (!isSharing) return;
+    const raf = requestAnimationFrame(() => {
+      html2canvas(reportRef.current, {
+        backgroundColor: '#ffffff',
+        scale: 2,
+        ignoreElements: (el) => el.classList && el.classList.contains('no-print'),
+      }).then((canvas) => {
+        canvas.toBlob((blob) => {
+          if (!blob) { setIsSharing(false); return; }
+          const suffix = hasSelection ? `-${selectedIds.size}employees` : '';
+          const fileName = `daily-report-${date}${company !== 'All' ? '-' + company.replace(/\s+/g, '') : ''}${suffix}.png`;
+          const file = new File([blob], fileName, { type: 'image/png' });
+          const shareText = hasSelection
+            ? `Daily delivery report — ${dateLabel} (${selectedIds.size} employee${selectedIds.size === 1 ? '' : 's'})`
+            : `Daily delivery report — ${dateLabel}`;
+          const finish = () => setIsSharing(false);
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            navigator.share({ files: [file], title: 'Daily delivery report', text: shareText })
+              .catch(() => {}).finally(finish);
+          } else {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(url);
+            finish();
+          }
+        }, 'image/png');
+      }).catch(() => setIsSharing(false));
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [isSharing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const upsertEntry = (form) => {
     const assigned = Number(form.assigned) || 0;
@@ -1639,9 +1671,15 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
         title="Daily delivery entry"
         subtitle="Record each employee's deliveries for the day — reports update automatically"
         right={
-          <div className="no-print" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div className="no-print" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {hasSelection && (
+              <span style={{ fontSize: 12, color: 'var(--amber-dark)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+                {selectedIds.size} of {dayEntries.length} selected
+                <button className="edm-btn edm-btn-ghost" style={{ padding: '3px 8px', fontSize: 11.5 }} onClick={clearSelection}>Clear</button>
+              </span>
+            )}
             <button className="edm-btn edm-btn-ghost" disabled={isSharing} onClick={shareReport}>
-              <Share2 size={15} /> {isSharing ? 'Preparing…' : 'Share / export report'}
+              <Share2 size={15} /> {isSharing ? 'Preparing…' : hasSelection ? `Share selected (${selectedIds.size})` : 'Share / export report'}
             </button>
             <button className="edm-btn edm-btn-amber" onClick={() => setModal({ mode: 'add' })}><Plus size={15} /> Add entry (other employee)</button>
           </div>
@@ -1675,27 +1713,42 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
               <div>
                 <div className="font-display" style={{ fontSize: 16, fontWeight: 700 }}>{COMPANY_NAME}</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Daily delivery report — {dateLabel}{company !== 'All' ? ` · ${company}` : ''}</div>
+                {hasSelection && (
+                  <div style={{ fontSize: 11, color: 'var(--amber-dark)', fontWeight: 600, marginTop: 2 }}>
+                    Selected employees only ({selectedIds.size} of {dayEntries.length})
+                  </div>
+                )}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5 }}>
-              <div><span style={{ color: 'var(--text-muted)' }}>Assigned </span><span className="font-mono" style={{ fontWeight: 700 }}>{dayAgg.assigned}</span></div>
-              <div><span style={{ color: 'var(--text-muted)' }}>Delivered </span><span className="font-mono" style={{ fontWeight: 700, color: 'var(--teal-dark)' }}>{dayAgg.delivered}</span></div>
-              <div><span style={{ color: 'var(--text-muted)' }}>Failed </span><span className="font-mono" style={{ fontWeight: 700, color: 'var(--danger)' }}>{dayAgg.failed}</span></div>
-              <div><span style={{ color: 'var(--text-muted)' }}>Success </span><span className="font-mono" style={{ fontWeight: 700 }}>{pct(dayAgg.successRate)}</span></div>
+              <div><span style={{ color: 'var(--text-muted)' }}>Assigned </span><span className="font-mono" style={{ fontWeight: 700 }}>{reportAgg.assigned}</span></div>
+              <div><span style={{ color: 'var(--text-muted)' }}>Delivered </span><span className="font-mono" style={{ fontWeight: 700, color: 'var(--teal-dark)' }}>{reportAgg.delivered}</span></div>
+              <div><span style={{ color: 'var(--text-muted)' }}>Failed </span><span className="font-mono" style={{ fontWeight: 700, color: 'var(--danger)' }}>{reportAgg.failed}</span></div>
+              <div><span style={{ color: 'var(--text-muted)' }}>Success </span><span className="font-mono" style={{ fontWeight: 700 }}>{pct(reportAgg.successRate)}</span></div>
             </div>
           </div>
         </div>
         <div className="edm-card edm-scroll" style={{ overflowX: 'auto', borderRadius: '0 0 12px 12px' }}>
           <table className="edm-table">
             <thead><tr>
+              <th className="no-print" style={{ width: 34 }}>
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={dayEntries.length === 0} title="Select all" />
+              </th>
               <th>Employee</th><th>Company</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Success %</th><th>Remarks</th><th className="no-print"></th>
             </tr></thead>
             <tbody>
               {dayEntries.map((en) => {
                 const emp = empById[en.employeeId];
                 const rate = en.assigned ? (en.delivered / en.assigned) * 100 : 0;
+                const isSelected = selectedIds.has(en.id);
+                // Only unselected rows disappear, and only for the moment we're capturing the
+                // export image — the checkbox stays fully usable while just browsing/selecting.
+                const rowHidden = isSharing && hasSelection && !isSelected;
                 return (
-                  <tr key={en.id}>
+                  <tr key={en.id} style={rowHidden ? { display: 'none' } : undefined}>
+                    <td className="no-print">
+                      <input type="checkbox" checked={isSelected} onChange={() => toggleOne(en.id)} />
+                    </td>
                     <td style={{ fontWeight: 600 }}>{emp ? emp.name : 'Unknown'}</td>
                     <td>{en.company}</td>
                     <td className="font-mono">{en.assigned}</td>
@@ -1712,7 +1765,7 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                   </tr>
                 );
               })}
-              {dayEntries.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No entries recorded for this date yet.</td></tr>}
+              {dayEntries.length === 0 && <tr><td colSpan={9} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No entries recorded for this date yet.</td></tr>}
             </tbody>
           </table>
         </div>
