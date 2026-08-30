@@ -426,7 +426,32 @@ function aggregate(entriesList, empById, rates) {
   return { assigned, delivered, failed, revenue, payroll, petrol, totalExpense, profit, successRate, margin };
 }
 
-function buildTrend(entriesList, empById, rates, start, end) {
+/* ---------------------------------- vendor payout helpers ----------------------------------
+   A vendor's payout is rate (₹/delivery) × products delivered by their assigned employees.
+   These are shared by every page that shows a profit figure, so "profit after vendor payout"
+   means the same thing everywhere — Dashboard, Profit and loss, and the Reports tabs. */
+
+// Employee id → total ₹/delivery rate across every vendor they're assigned to (normally just one).
+function vendorRateByEmployeeMap(vendors) {
+  const map = new Map();
+  (vendors || []).forEach((v) => {
+    const rate = Number(v.amount) || 0;
+    if (!rate) return;
+    (v.employeeIds || []).forEach((id) => map.set(id, (map.get(id) || 0) + rate));
+  });
+  return map;
+}
+
+// Total vendor payout implied by a set of entries (already filtered by date range / company /
+// whatever else the caller cares about).
+function totalVendorPayout(vendors, entriesList) {
+  const rateMap = vendorRateByEmployeeMap(vendors);
+  if (rateMap.size === 0) return 0;
+  return entriesList.reduce((sum, en) => sum + (rateMap.get(en.employeeId) || 0) * en.delivered, 0);
+}
+
+function buildTrend(entriesList, empById, rates, start, end, vendors) {
+  const vendorRateMap = vendorRateByEmployeeMap(vendors);
   const spanDays = Math.round((end - start) / 86400000) + 1;
   let keyFn, labelFn;
   if (spanDays <= 31) {
@@ -450,6 +475,8 @@ function buildTrend(entriesList, empById, rates, start, end) {
     const emp = empById[en.employeeId];
     const { pay, petrol } = calcPayroll(en.delivered, emp, rates);
     rec.expense += pay + petrol;
+    const vendorRate = vendorRateMap.get(en.employeeId);
+    if (vendorRate) rec.expense += vendorRate * en.delivered;
   });
   return Array.from(map.values()).sort((a, b) => a.key.localeCompare(b.key))
     .map((r) => ({ ...r, label: labelFn(r.key), profit: r.revenue - r.expense }));
@@ -1205,7 +1232,7 @@ function DashboardPage({ employees, entries, empById, rates, vendors = [] }) {
   const [mStart, mEnd] = [startOfMonth(t), endOfMonth(t)];
   const monthEntries = entries.filter((en) => inRange(en.date, mStart, mEnd));
   const overall = aggregate(monthEntries, empById, rates);
-  const trend = buildTrend(monthEntries, empById, rates, mStart, mEnd);
+  const trend = buildTrend(monthEntries, empById, rates, mStart, mEnd, vendors);
 
   const activeEmp = employees.filter((e) => e.status === 'Active').length;
 
@@ -1218,8 +1245,8 @@ function DashboardPage({ employees, entries, empById, rates, vendors = [] }) {
     const rate = Number(v.amount) || 0;
     return { ...v, employeeCount: ids.size, delivered, rate, payout: rate * delivered };
   });
-  const totalVendorPayout = vendorBreakdown.reduce((s, v) => s + v.payout, 0);
-  const netProfit = overall.profit - totalVendorPayout;
+  const totalVendorPayoutAmt = vendorBreakdown.reduce((s, v) => s + v.payout, 0);
+  const netProfit = overall.profit - totalVendorPayoutAmt;
   const netMargin = overall.revenue ? (netProfit / overall.revenue) * 100 : 0;
 
   return (
@@ -1233,7 +1260,7 @@ function DashboardPage({ employees, entries, empById, rates, vendors = [] }) {
         <MetricCard
           label="Net profit this month"
           value={inr(netProfit)}
-          sub={totalVendorPayout > 0 ? `${netMargin.toFixed(1)}% margin · after ${inr(totalVendorPayout)} vendor payout` : `${netMargin.toFixed(1)}% margin`}
+          sub={totalVendorPayoutAmt > 0 ? `${netMargin.toFixed(1)}% margin · after ${inr(totalVendorPayoutAmt)} vendor payout` : `${netMargin.toFixed(1)}% margin`}
           tone={netProfit >= 0 ? 'teal' : 'danger'}
           icon={Wallet}
         />
@@ -1281,6 +1308,8 @@ function DashboardPage({ employees, entries, empById, rates, vendors = [] }) {
         {COMPANIES.map((c) => {
           const ce = monthEntries.filter((en) => en.company === c);
           const a = aggregate(ce, empById, rates);
+          const cVendorPayout = totalVendorPayout(vendors, ce);
+          const cNetProfit = a.profit - cVendorPayout;
           return (
             <div key={c} className="edm-card" style={{ padding: 18 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
@@ -1290,8 +1319,8 @@ function DashboardPage({ employees, entries, empById, rates, vendors = [] }) {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
                 <div><div className="edm-label">Deliveries</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{a.delivered}</div></div>
                 <div><div className="edm-label">Revenue</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{inr(a.revenue)}</div></div>
-                <div><div className="edm-label">Expense</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{inr(a.totalExpense)}</div></div>
-                <div><div className="edm-label">Profit</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15, color: a.profit >= 0 ? 'var(--teal-dark)' : 'var(--danger)' }}>{inr(a.profit)}</div></div>
+                <div><div className="edm-label">Expense</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15 }}>{inr(a.totalExpense + cVendorPayout)}</div></div>
+                <div><div className="edm-label">Profit</div><div className="font-mono" style={{ fontWeight: 700, fontSize: 15, color: cNetProfit >= 0 ? 'var(--teal-dark)' : 'var(--danger)' }}>{inr(cNetProfit)}</div></div>
               </div>
             </div>
           );
@@ -3189,7 +3218,10 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
   );
 
   const overall = aggregate(filtered, empById, rates);
-  const trend = buildTrend(filtered, empById, rates, start, end);
+  const trend = buildTrend(filtered, empById, rates, start, end, vendors);
+  const vendorPayout = totalVendorPayout(vendors, filtered);
+  const netProfit = overall.profit - vendorPayout;
+  const netMargin = overall.revenue ? (netProfit / overall.revenue) * 100 : 0;
 
   const empPerf = employees.map((e) => {
     const es = filtered.filter((en) => en.employeeId === e.id);
@@ -3209,7 +3241,9 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
 
   const companyPerf = COMPANIES.map((c) => {
     const ce = filtered.filter((en) => en.company === c);
-    return { company: c, ...aggregate(ce, empById, rates) };
+    const agg = aggregate(ce, empById, rates);
+    const cVendorPayout = totalVendorPayout(vendors, ce);
+    return { company: c, ...agg, vendorPayout: cVendorPayout, netProfit: agg.profit - cVendorPayout };
   });
 
   const rangeLabel = start.getTime() === end.getTime()
@@ -3234,8 +3268,9 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
       ['Revenue (₹)', Math.round(overall.revenue)],
       ['Payroll (₹)', Math.round(overall.payroll)],
       ['Petrol allowance (₹)', Math.round(overall.petrol)],
-      ['Profit (₹)', Math.round(overall.profit)],
-      ['Margin', pct(overall.margin)],
+      ['Vendor payout (₹)', Math.round(vendorPayout)],
+      ['Profit (₹)', Math.round(netProfit)],
+      ['Margin', pct(netMargin)],
       [],
       ['Employee rankings'],
       ['#', 'Employee ID', 'Employee', 'Company', 'Status', 'Assigned', 'Delivered', 'Failed', 'Success %', 'Revenue (₹)', 'Payroll (₹)', 'Petrol (₹)', 'Total salary (₹)'],
@@ -3246,10 +3281,10 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
       ]),
       [],
       ['Company-wise performance'],
-      ['Company', 'Assigned', 'Delivered', 'Failed', 'Success %', 'Revenue (₹)', 'Expense (₹)', 'Profit (₹)'],
+      ['Company', 'Assigned', 'Delivered', 'Failed', 'Success %', 'Revenue (₹)', 'Expense (₹)', 'Vendor payout (₹)', 'Profit (₹)'],
       ...companyPerf.map((c) => [
         c.company, c.assigned, c.delivered, c.failed, c.successRate.toFixed(1),
-        Math.round(c.revenue), Math.round(c.totalExpense), Math.round(c.profit),
+        Math.round(c.revenue), Math.round(c.totalExpense), Math.round(c.vendorPayout), Math.round(c.netProfit),
       ]),
     ];
     downloadCsv(`${level}_report_${toISO(start)}_to_${toISO(end)}.csv`, rows);
@@ -3276,7 +3311,13 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
         <MetricCard label="Deliveries completed" value={overall.delivered.toLocaleString('en-IN')} sub={`of ${overall.assigned} assigned`} icon={Package} tone="teal" />
         <MetricCard label="Failed deliveries" value={overall.failed} sub={pct(100 - overall.successRate) + ' failure rate'} icon={XCircle} tone="danger" />
         <MetricCard label="Revenue earned" value={inr(overall.revenue)} icon={TrendingUp} tone="navy" />
-        <MetricCard label="Profit" value={inr(overall.profit)} sub={`${overall.margin.toFixed(1)}% margin`} icon={Wallet} tone={overall.profit >= 0 ? 'teal' : 'danger'} />
+        <MetricCard
+          label="Profit"
+          value={inr(netProfit)}
+          sub={vendorPayout > 0 ? `${netMargin.toFixed(1)}% margin · after ${inr(vendorPayout)} vendor payout` : `${netMargin.toFixed(1)}% margin`}
+          icon={Wallet}
+          tone={netProfit >= 0 ? 'teal' : 'danger'}
+        />
       </div>
 
       <div className="edm-card" style={{ padding: 18, marginBottom: 20 }}>
@@ -3329,7 +3370,7 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
               <div key={c.company} style={{ padding: 12, borderRadius: 10, background: '#F7F8FA' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                   <span style={{ fontWeight: 600, fontSize: 13.5 }}>{c.company}</span>
-                  <span className="font-mono" style={{ fontWeight: 700, fontSize: 13.5, color: c.profit >= 0 ? 'var(--teal-dark)' : 'var(--danger)' }}>{inr(c.profit)}</span>
+                  <span className="font-mono" style={{ fontWeight: 700, fontSize: 13.5, color: c.netProfit >= 0 ? 'var(--teal-dark)' : 'var(--danger)' }}>{inr(c.netProfit)}</span>
                 </div>
                 <RouteProgress percent={c.successRate} width={140} />
                 <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
@@ -3362,7 +3403,7 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
 
 /* ---------------------------------- Profit & Loss page ---------------------------------- */
 
-function PnLPage({ employees, entries, empById, rates }) {
+function PnLPage({ employees, entries, empById, rates, vendors = [] }) {
   const COMPANIES = useContext(CompaniesContext);
   const [preset, setPreset] = useState('thisMonth');
   const [customStart, setCustomStart] = useState(toISO(today()));
@@ -3372,8 +3413,18 @@ function PnLPage({ employees, entries, empById, rates }) {
   const [start, end] = getRange(preset, customStart, customEnd);
   const filtered = entries.filter((en) => inRange(en.date, start, end) && (companyFilter === 'All' || en.company === companyFilter));
   const a = aggregate(filtered, empById, rates);
+  const vendorPayout = totalVendorPayout(vendors, filtered);
+  const netProfit = a.profit - vendorPayout;
+  const netMargin = a.revenue ? (netProfit / a.revenue) * 100 : 0;
 
-  const companyRows = COMPANIES.map((c) => ({ company: c, ...aggregate(filtered.filter((en) => en.company === c), empById, rates) }));
+  // Vendor payout per company too — an entry already carries its own company, so this stays
+  // accurate even though a vendor's employees can be split across companies.
+  const companyRows = COMPANIES.map((c) => {
+    const ce = filtered.filter((en) => en.company === c);
+    const agg = aggregate(ce, empById, rates);
+    const cVendorPayout = totalVendorPayout(vendors, ce);
+    return { company: c, ...agg, vendorPayout: cVendorPayout, netProfit: agg.profit - cVendorPayout };
+  });
 
   const Row = ({ label, value, bold, tone }) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #EEF0F2' }}>
@@ -3396,13 +3447,14 @@ function PnLPage({ employees, entries, empById, rates }) {
           <Row label="Revenue" value={inr(a.revenue)} tone="teal" />
           <Row label="Payroll" value={`(${inr(a.payroll)})`} />
           <Row label="Petrol allowance" value={`(${inr(a.petrol)})`} />
-          <Row label="Total expenses" value={`(${inr(a.totalExpense)})`} />
+          {vendorPayout > 0 && <Row label="Vendor payout" value={`(${inr(vendorPayout)})`} />}
+          <Row label="Total expenses" value={`(${inr(a.totalExpense + vendorPayout)})`} />
           <div style={{ paddingTop: 12 }}>
-            <Row label="Net profit" value={inr(a.profit)} bold tone={a.profit >= 0 ? 'teal' : 'danger'} />
+            <Row label="Net profit" value={inr(netProfit)} bold tone={netProfit >= 0 ? 'teal' : 'danger'} />
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 10 }}>
             <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Profit margin</span>
-            <span className="font-mono" style={{ fontWeight: 700 }}>{pct(a.margin)}</span>
+            <span className="font-mono" style={{ fontWeight: 700 }}>{pct(netMargin)}</span>
           </div>
         </div>
 
@@ -3413,14 +3465,14 @@ function PnLPage({ employees, entries, empById, rates }) {
               <div key={c.company}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                   <span style={{ fontWeight: 600, fontSize: 13.5 }}>{c.company}</span>
-                  <span className="font-mono" style={{ fontWeight: 700, color: c.profit >= 0 ? 'var(--teal-dark)' : 'var(--danger)' }}>{inr(c.profit)}</span>
+                  <span className="font-mono" style={{ fontWeight: 700, color: c.netProfit >= 0 ? 'var(--teal-dark)' : 'var(--danger)' }}>{inr(c.netProfit)}</span>
                 </div>
                 <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: '#EEF0F2' }}>
-                  <div style={{ width: `${c.revenue ? Math.min(100, (c.totalExpense / c.revenue) * 100) : 0}%`, background: 'var(--amber)' }} />
+                  <div style={{ width: `${c.revenue ? Math.min(100, ((c.totalExpense + c.vendorPayout) / c.revenue) * 100) : 0}%`, background: 'var(--amber)' }} />
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 11.5, color: 'var(--text-muted)' }}>
                   <span>Revenue {inr(c.revenue)}</span>
-                  <span>Expense {inr(c.totalExpense)}</span>
+                  <span>Expense {inr(c.totalExpense + c.vendorPayout)}</span>
                 </div>
               </div>
             ))}
@@ -4195,7 +4247,7 @@ function DashboardApp({ currentUser, onLogout }) {
       case 'reportWeekly': return <ReportPage level="weekly" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       case 'reportMonthly': return <ReportPage level="monthly" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       case 'reportYearly': return <ReportPage level="yearly" employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
-      case 'pnl': return <PnLPage employees={employees} entries={entries} empById={empById} rates={rates} />;
+      case 'pnl': return <PnLPage employees={employees} entries={entries} empById={empById} rates={rates} vendors={vendors} />;
       case 'settings': return (
         <SettingsPage
           rates={rates} setRates={setRates}
