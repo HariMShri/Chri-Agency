@@ -1899,6 +1899,9 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
       assigned: existing ? String(existing.assigned) : '',
       delivered: existing ? String(existing.delivered) : '',
       remarks: existing ? existing.remarks : '',
+      // Defaults to the employee's usual SIM, but an existing entry's own recorded
+      // SIM always wins — that's what lets a given day's SIM differ from the norm.
+      simName: existing ? (existing.simName || '') : (emp.simName || ''),
     };
   });
 
@@ -1922,7 +1925,7 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
     const assigned = Number(row.assigned) || 0;
     const delivered = Math.min(assigned, Number(row.delivered) || 0);
     const failed = Math.max(0, assigned - delivered);
-    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '' };
+    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '', simName: row.simName || '' };
     setEntries((prev) => {
       const idx = prev.findIndex((en) => en.id === record.id);
       if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
@@ -1937,6 +1940,7 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
   const columns = [
     { key: 'employee', label: 'Employee', getValue: (r) => empById[r.employeeId]?.name || r.employeeId, filterType: 'text' },
     { key: 'company', label: 'Company', getValue: (r) => empById[r.employeeId]?.company || '', filterType: 'select', filterOptions: COMPANIES },
+    { key: 'simName', label: 'SIM name', getValue: (r) => r.simName || '', filterType: 'text' },
     { key: 'assigned', label: 'Assigned', getValue: (r) => Number(r.assigned) || 0, filterType: 'text' },
     { key: 'delivered', label: 'Delivered', getValue: (r) => Number(r.delivered) || 0, filterType: 'text' },
     { key: 'failed', label: 'Failed', getValue: (r) => Math.max(0, (Number(r.assigned) || 0) - Math.min(Number(r.assigned) || 0, Number(r.delivered) || 0)), filterType: 'text' },
@@ -1970,6 +1974,13 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
               <tr key={row.employeeId}>
                 <td style={{ fontWeight: 600 }}>{emp ? emp.name : row.employeeId}</td>
                 <td>{emp ? emp.company : ''}</td>
+                <td style={{ minWidth: 120 }}>
+                  <input className="edm-input" style={{ padding: '5px 8px' }}
+                    value={row.simName}
+                    onChange={(e) => setRow(row.employeeId, { simName: e.target.value })}
+                    onBlur={() => saveRow(row.employeeId)}
+                    placeholder="SIM name" />
+                </td>
                 <td style={{ minWidth: 88 }}>
                   <input type="number" min="0" className="edm-input" style={{ padding: '5px 8px' }}
                     value={row.assigned}
@@ -2000,7 +2011,7 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
               </tr>
             );
           })}
-          {visibleRows.length === 0 && <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees match the current filters.</td></tr>}
+          {visibleRows.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees match the current filters.</td></tr>}
         </tbody>
       </table>
     </div>
@@ -2009,17 +2020,29 @@ function QuickEntryGrid({ date, company, employees, entries, setEntries, empById
 
 function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
   const COMPANIES = useContext(CompaniesContext);
+  const [viewMode, setViewMode] = useState('day'); // 'day' | 'employee'
   const [date, setDate] = useState(toISO(today()));
   const [company, setCompany] = useState('All');
+  const [empFilterId, setEmpFilterId] = useState('');
+  const [monthValue, setMonthValue] = useState(() => toISO(today()).slice(0, 7));
   const [modal, setModal] = useState(null);
   const [deleteId, setDeleteId] = useState(null);
   const [monthModalOpen, setMonthModalOpen] = useState(false);
 
+  const isEmployeeMode = viewMode === 'employee';
+  const empFilterName = empById[empFilterId]?.name || '';
+  const monthLabel = fromISO(`${monthValue}-01`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const sortedEmployees = useMemo(() => [...employees].sort((a, b) => a.name.localeCompare(b.name)), [employees]);
+
   const dayEntries = entries.filter((en) => en.date === date && (company === 'All' || en.company === company));
-  const dayAgg = aggregate(dayEntries, empById, rates);
+  const monthEntries = empFilterId
+    ? entries.filter((en) => en.employeeId === empFilterId && en.date.slice(0, 7) === monthValue).sort((a, b) => b.date.localeCompare(a.date))
+    : [];
+  const baseEntries = isEmployeeMode ? monthEntries : dayEntries;
+  const dayAgg = aggregate(baseEntries, empById, rates);
 
   const tableControls = useTableControls();
-  const reportColumns = [
+  const dayColumns = [
     { key: 'employee', label: 'Employee', getValue: (en) => empById[en.employeeId]?.name || 'Unknown', filterType: 'text' },
     { key: 'assigned', label: 'Assigned', getValue: (en) => en.assigned, filterType: 'text' },
     { key: 'delivered', label: 'Delivered', getValue: (en) => en.delivered, filterType: 'text' },
@@ -2027,12 +2050,23 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
     { key: 'successRate', label: 'Success %', getValue: (en) => en.assigned ? (en.delivered / en.assigned) * 100 : 0, filterType: 'text' },
     { key: 'remarks', label: 'Remarks', getValue: (en) => en.remarks || '', filterType: 'text' },
   ];
-  const visibleEntries = tableControls.apply(dayEntries, reportColumns);
+  const monthColumns = [
+    { key: 'date', label: 'Date', getValue: (en) => en.date, filterType: 'text' },
+    { key: 'company', label: 'Company', getValue: (en) => en.company, filterType: 'text' },
+    { key: 'simName', label: 'SIM name', getValue: (en) => en.simName || '', filterType: 'text' },
+    { key: 'assigned', label: 'Assigned', getValue: (en) => en.assigned, filterType: 'text' },
+    { key: 'delivered', label: 'Delivered', getValue: (en) => en.delivered, filterType: 'text' },
+    { key: 'failed', label: 'Failed', getValue: (en) => en.failed, filterType: 'text' },
+    { key: 'successRate', label: 'Success %', getValue: (en) => en.assigned ? (en.delivered / en.assigned) * 100 : 0, filterType: 'text' },
+    { key: 'remarks', label: 'Remarks', getValue: (en) => en.remarks || '', filterType: 'text' },
+  ];
+  const reportColumns = isEmployeeMode ? monthColumns : dayColumns;
+  const visibleEntries = tableControls.apply(baseEntries, reportColumns);
 
-  // Which employees' rows to include when the report is exported/shared. Empty selection
-  // means "everyone visible" — checking specific employees narrows the shared report to just them.
+  // Which rows to include when the report is exported/shared. Empty selection means
+  // "everyone visible" — checking specific rows narrows the shared report to just them.
   const [selectedIds, setSelectedIds] = useState(() => new Set());
-  useEffect(() => { setSelectedIds(new Set()); }, [date, company]);
+  useEffect(() => { setSelectedIds(new Set()); }, [date, company, viewMode, empFilterId, monthValue]);
 
   const allSelected = visibleEntries.length > 0 && visibleEntries.every((en) => selectedIds.has(en.id));
   const toggleAll = () => setSelectedIds((prev) => {
@@ -2076,12 +2110,16 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
       }).then((canvas) => {
         canvas.toBlob((blob) => {
           if (!blob) { setIsSharing(false); return; }
-          const suffix = hasSelection ? `-${selectedIds.size}employees` : '';
-          const fileName = `daily-report-${date}${company !== 'All' ? '-' + company.replace(/\s+/g, '') : ''}${suffix}.png`;
+          const suffix = hasSelection ? `-${selectedIds.size}entries` : '';
+          const fileName = isEmployeeMode
+            ? `employee-history-${(empFilterName || 'employee').replace(/\s+/g, '')}-${monthValue}${suffix}.png`
+            : `daily-report-${date}${company !== 'All' ? '-' + company.replace(/\s+/g, '') : ''}${suffix}.png`;
           const file = new File([blob], fileName, { type: 'image/png' });
-          const shareText = hasSelection
-            ? `Daily delivery report — ${dateLabel} (${selectedIds.size} employee${selectedIds.size === 1 ? '' : 's'})`
-            : `Daily delivery report — ${dateLabel}`;
+          const shareText = isEmployeeMode
+            ? `Monthly delivery history — ${empFilterName} · ${monthLabel}${hasSelection ? ` (${selectedIds.size} selected)` : ''}`
+            : (hasSelection
+              ? `Daily delivery report — ${dateLabel} (${selectedIds.size} employee${selectedIds.size === 1 ? '' : 's'})`
+              : `Daily delivery report — ${dateLabel}`);
           const finish = () => setIsSharing(false);
           if (navigator.canShare && navigator.canShare({ files: [file] })) {
             navigator.share({ files: [file], title: 'Daily delivery report', text: shareText })
@@ -2133,12 +2171,12 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
     <div>
       <SectionHeader
         title="Daily delivery entry"
-        subtitle="Record each employee's deliveries for the day — reports update automatically"
+        subtitle={isEmployeeMode ? "View and edit one employee's delivery history for a chosen month" : "Record each employee's deliveries for the day — reports update automatically"}
         right={
           <div className="no-print" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {hasSelection && (
               <span style={{ fontSize: 12, color: 'var(--amber-dark)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
-                {selectedIds.size} of {dayEntries.length} selected
+                {selectedIds.size} of {baseEntries.length} selected
                 <button className="edm-btn edm-btn-ghost" style={{ padding: '3px 8px', fontSize: 11.5 }} onClick={clearSelection}>Clear</button>
               </span>
             )}
@@ -2146,20 +2184,40 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
               <Share2 size={15} /> {isSharing ? 'Preparing…' : hasSelection ? `Share selected (${selectedIds.size})` : 'Share / export report'}
             </button>
             <button className="edm-btn edm-btn-ghost" onClick={() => setMonthModalOpen(true)}><CalendarDays size={15} /> Monthly entry (one employee)</button>
-            <button className="edm-btn edm-btn-amber" onClick={() => setModal({ mode: 'add' })}><Plus size={15} /> Add entry (other employee)</button>
+            <button className="edm-btn edm-btn-amber" onClick={() => setModal({ mode: 'add' })}><Plus size={15} /> {isEmployeeMode ? 'Add entry' : 'Add entry (other employee)'}</button>
           </div>
         }
       />
 
+      <div className="no-print" style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button className={`edm-tab ${!isEmployeeMode ? 'edm-tab-active' : ''}`} onClick={() => setViewMode('day')}>By day</button>
+        <button className={`edm-tab ${isEmployeeMode ? 'edm-tab-active' : ''}`} onClick={() => setViewMode('employee')}>By employee (monthly)</button>
+      </div>
+
       <div className="edm-card" style={{ padding: 14, display: 'flex', gap: 14, alignItems: 'flex-end', marginBottom: 16, flexWrap: 'wrap' }}>
-        <div><label className="edm-label">Date</label><input type="date" className="edm-input" value={date} onChange={(e) => setDate(e.target.value)} /></div>
-        <div style={{ minWidth: 180 }}>
-          <label className="edm-label">Company</label>
-          <select className="edm-select" value={company} onChange={(e) => setCompany(e.target.value)}>
-            <option value="All">All companies</option>
-            {COMPANIES.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
+        {isEmployeeMode ? (
+          <>
+            <div style={{ minWidth: 220 }}>
+              <label className="edm-label">Employee</label>
+              <select className="edm-select" value={empFilterId} onChange={(e) => setEmpFilterId(e.target.value)}>
+                <option value="">Select an employee…</option>
+                {sortedEmployees.map((e) => <option key={e.id} value={e.id}>{e.name}{e.status === 'Inactive' ? ' (inactive)' : ''}</option>)}
+              </select>
+            </div>
+            <div><label className="edm-label">Month</label><input type="month" className="edm-input" value={monthValue} onChange={(e) => setMonthValue(e.target.value)} /></div>
+          </>
+        ) : (
+          <>
+            <div><label className="edm-label">Date</label><input type="date" className="edm-input" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+            <div style={{ minWidth: 180 }}>
+              <label className="edm-label">Company</label>
+              <select className="edm-select" value={company} onChange={(e) => setCompany(e.target.value)}>
+                <option value="All">All companies</option>
+                {COMPANIES.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          </>
+        )}
         <div style={{ display: 'flex', gap: 18, marginLeft: 'auto', flexWrap: 'wrap' }}>
           <div><div className="edm-label">Assigned</div><div className="font-mono" style={{ fontWeight: 700 }}>{dayAgg.assigned}</div></div>
           <div><div className="edm-label">Delivered</div><div className="font-mono" style={{ fontWeight: 700, color: 'var(--teal-dark)' }}>{dayAgg.delivered}</div></div>
@@ -2168,8 +2226,15 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
         </div>
       </div>
 
-      <QuickEntryGrid date={date} company={company} employees={employees} entries={entries} setEntries={setEntries} empById={empById} />
+      {!isEmployeeMode && (
+        <QuickEntryGrid date={date} company={company} employees={employees} entries={entries} setEntries={setEntries} empById={empById} />
+      )}
 
+      {isEmployeeMode && !empFilterId ? (
+        <div className="edm-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13.5 }}>
+          Select an employee above to view and edit their delivery history for {monthLabel}.
+        </div>
+      ) : (
       <div ref={reportRef} style={{ background: '#fff' }}>
         <div className="edm-card" style={{ padding: 16, borderRadius: '12px 12px 0 0', borderBottom: 'none' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
@@ -2177,7 +2242,9 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
               <img src={LOGO_DATA_URI} alt="" style={{ width: 32, height: 32, objectFit: 'contain', flexShrink: 0 }} />
               <div>
                 <div className="font-display" style={{ fontSize: 16, fontWeight: 700 }}>{COMPANY_NAME}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Daily delivery report — {dateLabel}{company !== 'All' ? ` · ${company}` : ''}</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  {isEmployeeMode ? `Monthly delivery history — ${empFilterName} · ${monthLabel}` : `Daily delivery report — ${dateLabel}${company !== 'All' ? ` · ${company}` : ''}`}
+                </div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5 }}>
@@ -2202,7 +2269,6 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
             />
             <tbody>
               {visibleEntries.map((en) => {
-                const emp = empById[en.employeeId];
                 const rate = en.assigned ? (en.delivered / en.assigned) * 100 : 0;
                 const isSelected = selectedIds.has(en.id);
                 // Only unselected rows disappear, and only for the moment we're capturing the
@@ -2213,7 +2279,15 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                     <td className="no-print">
                       <input type="checkbox" checked={isSelected} onChange={() => toggleOne(en.id)} />
                     </td>
-                    <td style={{ fontWeight: 600 }}>{emp ? emp.name : 'Unknown'}</td>
+                    {isEmployeeMode ? (
+                      <>
+                        <td style={{ fontWeight: 600 }}>{fromISO(en.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
+                        <td>{en.company}</td>
+                        <td style={{ color: en.simName ? 'var(--text)' : 'var(--text-muted)' }}>{en.simName || 'Unassigned'}</td>
+                      </>
+                    ) : (
+                      <td style={{ fontWeight: 600 }}>{empById[en.employeeId]?.name || 'Unknown'}</td>
+                    )}
                     <td className="font-mono">{en.assigned}</td>
                     <td className="font-mono" style={{ color: 'var(--teal-dark)' }}>{en.delivered}</td>
                     <td className="font-mono" style={{ color: 'var(--danger)' }}>{en.failed}</td>
@@ -2228,17 +2302,26 @@ function DailyEntryPage({ employees, entries, setEntries, empById, rates }) {
                   </tr>
                 );
               })}
-              {visibleEntries.length === 0 && <tr><td colSpan={8} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>{dayEntries.length === 0 ? 'No entries recorded for this date yet.' : 'No entries match the current filters.'}</td></tr>}
+              {visibleEntries.length === 0 && (
+                <tr><td colSpan={reportColumns.length + 2} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>
+                  {baseEntries.length === 0
+                    ? (isEmployeeMode ? `No entries recorded for ${empFilterName} in ${monthLabel}.` : 'No entries recorded for this date yet.')
+                    : 'No entries match the current filters.'}
+                </td></tr>
+              )}
             </tbody>
           </table>
         </div>
       </div>
+      )}
 
       {(modal?.mode === 'add' || modal?.mode === 'edit') && (
         <DailyEntryForm
           employees={employees}
           entries={entries}
-          initial={modal.mode === 'edit' ? modal.entry : { id: uid(), date, company: COMPANIES[0], employeeId: '', assigned: '', delivered: '', failed: 0, remarks: '' }}
+          initial={modal.mode === 'edit' ? modal.entry : (isEmployeeMode && empFilterId
+            ? { id: uid(), date: toISO(today()).slice(0, 7) === monthValue ? toISO(today()) : `${monthValue}-01`, company: empById[empFilterId]?.company || COMPANIES[0], employeeId: empFilterId, assigned: '', delivered: '', failed: 0, remarks: '', simName: empById[empFilterId]?.simName || '' }
+            : { id: uid(), date, company: COMPANIES[0], employeeId: '', assigned: '', delivered: '', failed: 0, remarks: '', simName: '' })}
           onSave={upsertEntry}
           onClose={() => setModal(null)}
           onEditExisting={(existing) => setModal({ mode: 'edit', entry: existing })}
@@ -2296,10 +2379,19 @@ function DailyEntryForm({ employees, entries, initial, onSave, onClose, onEditEx
         </div>
         <div>
           <label className="edm-label">Employee</label>
-          <select className="edm-select" value={form.employeeId} onChange={(e) => set('employeeId', e.target.value)}>
+          <select className="edm-select" value={form.employeeId} onChange={(e) => {
+            const emp = employees.find((x) => x.id === e.target.value);
+            // Auto-fill the employee's usual SIM, but never overwrite one already typed in.
+            setForm((f) => ({ ...f, employeeId: e.target.value, simName: f.simName || (emp ? emp.simName || '' : '') }));
+          }}>
             <option value="">Select employee</option>
             {companyEmployees.map((e) => <option key={e.id} value={e.id}>{e.name}{e.status === 'Inactive' ? ' (inactive)' : ''}</option>)}
           </select>
+        </div>
+        <div>
+          <label className="edm-label">SIM name used</label>
+          <input className="edm-input" value={form.simName || ''} onChange={(e) => set('simName', e.target.value)} placeholder="e.g. Bala Krishnan SIM" />
+          <p style={{ fontSize: 11.5, color: 'var(--text-muted)', margin: '4px 0 0' }}>Defaults to this employee's usual SIM — change it if a different one was used today.</p>
         </div>
         {duplicate && (
           <div style={{ background: '#FDF1E7', border: '1px solid var(--amber)', borderRadius: 8, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -2352,12 +2444,16 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
 
   const buildRows = () => monthDates.map((date) => {
     const existing = employeeId ? entries.find((en) => en.employeeId === employeeId && en.date === date) : null;
+    const emp = empById[employeeId];
     return {
       date,
       entryId: existing ? existing.id : null,
       assigned: existing ? String(existing.assigned) : '',
       delivered: existing ? String(existing.delivered) : '',
       remarks: existing ? existing.remarks : '',
+      // Defaults to the employee's usual SIM, but an existing entry's own recorded
+      // SIM always wins — that's what lets a given day's SIM differ from the norm.
+      simName: existing ? (existing.simName || '') : (emp ? emp.simName || '' : ''),
     };
   });
 
@@ -2376,7 +2472,7 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
     const assigned = Number(row.assigned) || 0;
     const delivered = Math.min(assigned, Number(row.delivered) || 0);
     const failed = Math.max(0, assigned - delivered);
-    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '' };
+    const record = { id: row.entryId || uid(), date, company: emp.company, employeeId, assigned, delivered, failed, remarks: row.remarks || '', simName: row.simName || '' };
     setEntries((prev) => {
       const idx = prev.findIndex((en) => en.id === record.id);
       if (idx >= 0) { const copy = [...prev]; copy[idx] = record; return copy; }
@@ -2397,7 +2493,7 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
   const monthLabel = fromISO(`${month}-01`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
 
   return (
-    <Modal title="Monthly delivery entry (single employee)" onClose={onClose} width={720}>
+    <Modal title="Monthly delivery entry (single employee)" onClose={onClose} width={820}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: 0 }}>
           Pick an employee and a month to fill in delivery numbers for every day at once — each row saves automatically as soon as you fill it in and click away.
@@ -2437,7 +2533,7 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
             <div className="edm-scroll" style={{ maxHeight: '46vh', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
               <table className="edm-table">
                 <thead><tr>
-                  <th>Date</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Remarks</th><th style={{ width: 40 }}></th>
+                  <th>Date</th><th>SIM name</th><th>Assigned</th><th>Delivered</th><th>Failed</th><th>Remarks</th><th style={{ width: 40 }}></th>
                 </tr></thead>
                 <tbody>
                   {rows.map((row) => {
@@ -2448,6 +2544,13 @@ function MonthlyEntryForm({ employees, entries, setEntries, empById, onClose }) 
                     return (
                       <tr key={row.date}>
                         <td style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{label}</td>
+                        <td style={{ minWidth: 120 }}>
+                          <input className="edm-input" style={{ padding: '5px 8px' }}
+                            value={row.simName}
+                            onChange={(e) => setRow(row.date, { simName: e.target.value })}
+                            onBlur={() => saveRow(row.date)}
+                            placeholder="SIM name" />
+                        </td>
                         <td style={{ minWidth: 80 }}>
                           <input type="number" min="0" className="edm-input" style={{ padding: '5px 8px' }}
                             value={row.assigned}
@@ -2499,6 +2602,7 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
   const [customStart, setCustomStart] = useState(toISO(today()));
   const [customEnd, setCustomEnd] = useState(toISO(today()));
   const [employeeFilter, setEmployeeFilter] = useState('All');
+  const [groupBy, setGroupBy] = useState('employee'); // 'employee' | 'sim'
 
   const [start, end] = getRange(preset, customStart, customEnd);
   const companyEmployees = employees.filter((e) => e.company === company);
@@ -2527,6 +2631,32 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
     { key: 'revenue', label: 'Revenue generated', getValue: (e) => e.revenue, filterType: 'text' },
   ];
   const visibleRevenue = tableControls.apply(empRevenue, revenueColumns);
+
+  // Grouped by SIM name — mirrors how the client company's own report is organised, so this
+  // can be checked against it directly. Since a SIM can be used by more than one employee
+  // across the range, each group lists every employee who logged time under it.
+  const simRevenue = useMemo(() => {
+    const map = new Map();
+    filtered.forEach((en) => {
+      const sim = en.simName || 'Unassigned SIM';
+      if (!map.has(sim)) map.set(sim, []);
+      map.get(sim).push(en);
+    });
+    return Array.from(map.entries()).map(([simName, es]) => {
+      const a = aggregate(es, empById, rates);
+      const empNames = [...new Set(es.map((en) => empById[en.employeeId]?.name || 'Unknown'))];
+      return { simName, delivered: a.delivered, revenue: a.revenue, employees: empNames };
+    }).sort((a, b) => b.revenue - a.revenue);
+  }, [filtered, empById, rates]);
+
+  const simTableControls = useTableControls();
+  const simColumns = [
+    { key: 'simName', label: 'SIM name', getValue: (r) => r.simName, filterType: 'text' },
+    { key: 'employees', label: 'Employees', getValue: (r) => r.employees.join(', '), filterType: 'text' },
+    { key: 'delivered', label: 'Delivered (range)', getValue: (r) => r.delivered, filterType: 'text' },
+    { key: 'revenue', label: 'Revenue generated', getValue: (r) => r.revenue, filterType: 'text' },
+  ];
+  const visibleSimRevenue = simTableControls.apply(simRevenue, simColumns);
 
   return (
     <div>
@@ -2568,22 +2698,46 @@ function RevenuePage({ company, employees, entries, empById, rates }) {
         </div>
       </div>
 
-      <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
-        <table className="edm-table">
-          <SortFilterHead columns={revenueColumns} controls={tableControls} />
-          <tbody>
-            {visibleRevenue.map((e) => (
-              <tr key={e.id}>
-                <td style={{ fontWeight: 600 }}>{e.name}</td>
-                <td><StatusBadge status={e.status} /></td>
-                <td className="font-mono">{e.delivered}</td>
-                <td className="font-mono" style={{ fontWeight: 600 }}>{inr(e.revenue)}</td>
-              </tr>
-            ))}
-            {visibleRevenue.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees match the current filters.</td></tr>}
-          </tbody>
-        </table>
+      <div className="edm-tab-row" style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <button className={`edm-tab ${groupBy === 'employee' ? 'edm-tab-active' : ''}`} onClick={() => setGroupBy('employee')}>By employee</button>
+        <button className={`edm-tab ${groupBy === 'sim' ? 'edm-tab-active' : ''}`} onClick={() => setGroupBy('sim')}>By SIM name</button>
       </div>
+
+      {groupBy === 'employee' ? (
+        <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
+          <table className="edm-table">
+            <SortFilterHead columns={revenueColumns} controls={tableControls} />
+            <tbody>
+              {visibleRevenue.map((e) => (
+                <tr key={e.id}>
+                  <td style={{ fontWeight: 600 }}>{e.name}</td>
+                  <td><StatusBadge status={e.status} /></td>
+                  <td className="font-mono">{e.delivered}</td>
+                  <td className="font-mono" style={{ fontWeight: 600 }}>{inr(e.revenue)}</td>
+                </tr>
+              ))}
+              {visibleRevenue.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No employees match the current filters.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="edm-card edm-scroll" style={{ overflowX: 'auto' }}>
+          <table className="edm-table">
+            <SortFilterHead columns={simColumns} controls={simTableControls} />
+            <tbody>
+              {visibleSimRevenue.map((r) => (
+                <tr key={r.simName}>
+                  <td style={{ fontWeight: 600, color: r.simName === 'Unassigned SIM' ? 'var(--text-muted)' : 'var(--text)' }}>{r.simName}</td>
+                  <td style={{ color: 'var(--text-muted)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.employees.join(', ')}</td>
+                  <td className="font-mono">{r.delivered}</td>
+                  <td className="font-mono" style={{ fontWeight: 600 }}>{inr(r.revenue)}</td>
+                </tr>
+              ))}
+              {visibleSimRevenue.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 24 }}>No entries match the current filters.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -3571,6 +3725,37 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
   const [importSuccess, setImportSuccess] = useState('');
   const [pendingImport, setPendingImport] = useState(null); // parsed data awaiting confirmation
   const fileInputRef = useRef(null);
+  const [simReviewChecks, setSimReviewChecks] = useState({}); // entryId -> included in the next apply?
+  const [simReviewDrafts, setSimReviewDrafts] = useState({}); // entryId -> edited SIM name text
+  const [simBackfillMsg, setSimBackfillMsg] = useState('');
+
+  // Historical daily entries sometimes had the SIM name typed straight into Remarks (e.g.
+  // "Bala Krishnan Sim") before there was a dedicated field for it. Find entries that still
+  // have no structured SIM name but whose remarks look like one of those notes, so they can
+  // be reviewed and copied into the real field — nothing is ever changed automatically.
+  const simCandidates = useMemo(() => {
+    return entries
+      .filter((en) => !en.simName && en.remarks)
+      .map((en) => {
+        const m = String(en.remarks).trim().match(/^(.*?)[\s-]*sim\.?$/i);
+        return { entry: en, guess: m ? m[1].trim() : '' };
+      })
+      .filter((c) => c.guess)
+      .sort((a, b) => b.entry.date.localeCompare(a.entry.date));
+  }, [entries]);
+
+  const applySimBackfill = () => {
+    const toApply = simCandidates.filter((c) => simReviewChecks[c.entry.id] !== false);
+    const patchMap = new Map();
+    toApply.forEach((c) => {
+      const val = (simReviewDrafts[c.entry.id] ?? c.guess).trim();
+      if (val) patchMap.set(c.entry.id, val);
+    });
+    if (patchMap.size === 0) return;
+    setEntries((prev) => prev.map((en) => (patchMap.has(en.id) ? { ...en, simName: patchMap.get(en.id) } : en)));
+    setSimBackfillMsg(`Applied SIM name to ${patchMap.size} ${patchMap.size === 1 ? 'entry' : 'entries'}.`);
+    setTimeout(() => setSimBackfillMsg(''), 3500);
+  };
 
   const save = () => { setRates(form); setSaved(true); setTimeout(() => setSaved(false), 1800); };
 
@@ -3696,7 +3881,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
       <div className="edm-card" style={{ padding: 20, marginBottom: 16, borderLeft: '4px solid var(--amber)' }}>
         <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: '0 0 6px' }}>Data &amp; backup</h3>
         <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 14px' }}>
-          Everything — employees, daily entries, rates, and companies — lives only in this browser. Export a backup regularly, and keep the file somewhere safe (email it to yourself, or save it to cloud storage).
+          Everything — employees, daily entries, rates, companies, hub locations, and vendors — syncs live to the cloud (Firestore), so it's already safe across devices. A downloaded backup is still worth keeping as a personal offline copy — useful for archiving a point in time, or restoring quickly if data ever needs to be rolled back.
         </p>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
           <button className="edm-btn edm-btn-amber" onClick={exportAllData}><Download size={15} /> Export all data (JSON)</button>
@@ -3709,6 +3894,45 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
         {importError && <p style={{ fontSize: 12.5, color: 'var(--danger)', marginTop: 10, marginBottom: 0 }}>{importError}</p>}
         {importSuccess && <p style={{ fontSize: 12.5, color: 'var(--teal-dark)', marginTop: 10, marginBottom: 0 }}>{importSuccess}</p>}
       </div>
+
+      {simCandidates.length > 0 && (
+        <div className="edm-card" style={{ padding: 20, marginBottom: 16, borderLeft: '4px solid var(--teal)' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
+            <h3 className="font-display" style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>SIM name cleanup</h3>
+            <button className="edm-btn edm-btn-amber" onClick={applySimBackfill}>Apply selected</button>
+          </div>
+          <p style={{ fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 14px' }}>
+            Found {simCandidates.length} older {simCandidates.length === 1 ? 'entry' : 'entries'} with a SIM name typed into Remarks instead of the dedicated field. Review the guess below, edit it if needed, uncheck any that shouldn't be applied, then apply — nothing changes until you do.
+          </p>
+          {simBackfillMsg && <p style={{ fontSize: 12.5, color: 'var(--teal-dark)', margin: '0 0 12px' }}>{simBackfillMsg}</p>}
+          <div className="edm-scroll" style={{ maxHeight: '40vh', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+            <table className="edm-table">
+              <thead><tr>
+                <th style={{ width: 34 }}></th><th>Date</th><th>Employee</th><th>Remarks</th><th>SIM name to apply</th>
+              </tr></thead>
+              <tbody>
+                {simCandidates.map(({ entry: en, guess }) => {
+                  const emp = employees.find((e) => e.id === en.employeeId);
+                  const checked = simReviewChecks[en.id] !== false;
+                  const draft = simReviewDrafts[en.id] ?? guess;
+                  return (
+                    <tr key={en.id}>
+                      <td><input type="checkbox" checked={checked} onChange={(e) => setSimReviewChecks((prev) => ({ ...prev, [en.id]: e.target.checked }))} /></td>
+                      <td style={{ whiteSpace: 'nowrap' }}>{en.date}</td>
+                      <td style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{emp ? emp.name : 'Unknown'}</td>
+                      <td style={{ color: 'var(--text-muted)' }}>{en.remarks}</td>
+                      <td style={{ minWidth: 160 }}>
+                        <input className="edm-input" style={{ padding: '5px 8px' }} value={draft}
+                          onChange={(e) => setSimReviewDrafts((prev) => ({ ...prev, [en.id]: e.target.value }))} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 16, marginBottom: 16 }}>
         {form.salaryStructures.map((s) => {
@@ -3949,7 +4173,7 @@ function SettingsPage({ rates, setRates, employees = [], entries = [], companies
           <div style={{ display: 'flex', gap: 10, marginBottom: 14, background: '#FDF1E7', border: '1px solid var(--amber)', borderRadius: 8, padding: 12 }}>
             <AlertTriangle size={18} color="#B8720A" style={{ flexShrink: 0, marginTop: 1 }} />
             <p style={{ fontSize: 13, margin: 0, color: '#7A4A0A' }}>
-              This will <strong>replace all current data</strong> — employees, entries, rates, and companies — with the contents of this file. Consider exporting your current data first if you haven't already.
+              This will <strong>replace all current data</strong> — employees, entries, rates, companies, hub locations, and vendors — with the contents of this file, for everyone signed in (it syncs live to the cloud). Consider exporting your current data first if you haven't already.
             </p>
           </div>
           <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -4353,8 +4577,8 @@ function DashboardApp({ currentUser, onLogout }) {
             <AlertTriangle size={18} color="#B8720A" style={{ flexShrink: 0 }} />
             <span style={{ fontSize: 13, color: '#7A4A0A', flex: 1 }}>
               {lastExportAt
-                ? `It's been over a week since your last backup (${new Date(lastExportAt).toLocaleDateString('en-IN')}). Export your data to keep it safe.`
-                : "You haven't exported a backup yet. Your data only lives in this browser — export it to keep it safe."}
+                ? `It's been over a week since your last local backup (${new Date(lastExportAt).toLocaleDateString('en-IN')}). Your data is already synced to the cloud — this just saves an offline copy.`
+                : "You haven't saved a local backup yet. Your data is already synced to the cloud, but it's worth keeping an offline copy too."}
             </span>
             <button className="edm-btn edm-btn-amber" style={{ padding: '7px 12px' }} onClick={exportFromReminder}><Download size={14} /> Export now</button>
             <button className="edm-btn edm-btn-ghost" style={{ padding: '7px 12px' }} onClick={() => setReminderSnoozedAt(new Date().toISOString())}>Remind me later</button>
