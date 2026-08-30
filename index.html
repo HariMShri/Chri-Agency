@@ -1164,6 +1164,12 @@ function SortFilterHead({ columns, controls, extraStart, extraEnd }) {
 
 function FilterBar({ preset, setPreset, customStart, customEnd, setCustomStart, setCustomEnd, employeeFilter, setEmployeeFilter, employees, companyFilter, setCompanyFilter, showCompany = true, showEmployee = true, vendors, vendorFilter, setVendorFilter, showVendor = false }) {
   const COMPANIES = useContext(CompaniesContext);
+  // When a vendor is selected, the Employee dropdown narrows to just that vendor's assigned
+  // employees — picking a vendor and then an unrelated employee would just zero out the results.
+  const selectedVendor = showVendor && vendorFilter && vendorFilter !== 'All' ? (vendors || []).find((v) => v.id === vendorFilter) : null;
+  const employeeOptions = selectedVendor
+    ? employees.filter((e) => (selectedVendor.employeeIds || []).includes(e.id))
+    : employees;
   return (
     <div className="edm-card" style={{ padding: 14, display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end', marginBottom: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 12.5, fontWeight: 600, paddingBottom: 8 }}>
@@ -1195,7 +1201,7 @@ function FilterBar({ preset, setPreset, customStart, customEnd, setCustomStart, 
           <label className="edm-label">Employee</label>
           <select className="edm-select" value={employeeFilter} onChange={(e) => setEmployeeFilter(e.target.value)}>
             <option value="All">All employees</option>
-            {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            {employeeOptions.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
           </select>
         </div>
       )}
@@ -3202,6 +3208,12 @@ function ReportPage({ level, employees, entries, empById, rates, vendors = [] })
   useEffect(() => {
     setPreset(meta.defaultPreset);
   }, [level]);
+
+  // Switching vendor drops any previously chosen employee — the Employee dropdown is already
+  // narrowed to the new vendor's list, so a stale selection outside it would just zero out the report.
+  useEffect(() => {
+    setEmployeeFilter('All');
+  }, [vendorFilter]);
 
   const vendorEmployeeIds = useMemo(() => {
     if (vendorFilter === 'All') return null;
